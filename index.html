@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no"/>
+<title>Huerta Agroecológica Siglo XXI</title>
+<link rel="icon" type="image/png" href="favicon-32.png"/>
+<link rel="apple-touch-icon" href="icon-192.png"/>
+<meta name="theme-color" content="#79B553"/>
+<meta name="description" content="Huerta Agroecológica Siglo XXI · Pigüé · Estudio de diseño y asistente integral"/>
+<style>
+  :root{
+    --bg:#0a0a0a;
+    --bg2:#141414;
+    --surface:rgba(255,255,255,0.05);
+    --border:rgba(255,255,255,0.10);
+    --border-strong:rgba(255,255,255,0.20);
+    --text:#f5f2e8;
+    --muted:rgba(245,242,232,0.55);
+    --green:#79B553;
+    --green-d:#4a7a2e;
+    --green-l:#a3d076;
+    --sun:#F9A825;
+    --sun-l:#FFCE54;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+  html,body{overscroll-behavior:none;}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:Georgia,'Times New Roman',serif;
+    line-height:1.55;
+    min-height:100vh;
+    background-image:radial-gradient(ellipse at top, #1a2a18 0%, #0a0a0a 70%);
+    display:flex;
+    flex-direction:column;
+  }
+  a{color:inherit;text-decoration:none;}
+  .brand{font-family:Georgia,serif;font-weight:800;letter-spacing:-0.02em;}
+  .editorial{font-family:Georgia,serif;font-style:italic;}
+  .mono{
+    font-family:'Courier New',monospace;
+    letter-spacing:0.08em;
+    text-transform:uppercase;
+    font-size:11px;
+  }
+  .stripe{
+    height:3px;
+    background:repeating-linear-gradient(
+      90deg,
+      var(--green) 0 16px,
+      transparent 16px 20px,
+      var(--sun) 20px 30px,
+      transparent 30px 34px
+    );
+  }
+  .container{
+    flex:1;
+    width:100%;
+    max-width:760px;
+    margin:0 auto;
+    padding:40px 22px 60px;
+    display:flex;
+    flex-direction:column;
+  }
+  .hero{
+    text-align:center;
+    margin-bottom:36px;
+    animation:fadeUp 0.6s cubic-bezier(.22,.61,.36,1);
+  }
+  .logo-wrap{
+    margin-bottom:22px;
+    display:flex;
+    justify-content:center;
+  }
+  .logo{
+    width:128px;
+    height:128px;
+    border-radius:50%;
+    box-shadow:0 8px 36px rgba(121,181,83,0.35),
+               0 0 0 6px rgba(121,181,83,0.08);
+    transition:transform 0.4s cubic-bezier(.22,.61,.36,1);
+  }
+  .logo:hover{transform:scale(1.04) rotate(-2deg);}
+  .kicker{
+    color:var(--sun);
+    margin-bottom:14px;
+  }
+  h1{
+    font-size:42px;
+    line-height:1;
+    margin-bottom:14px;
+    color:var(--text);
+  }
+  h1 em{
+    color:var(--green-l);
+    font-style:italic;
+    font-weight:700;
+  }
+  .lead{
+    color:var(--muted);
+    font-size:16px;
+    max-width:480px;
+    margin:0 auto;
+    line-height:1.6;
+  }
+  .divider{
+    display:flex;
+    align-items:center;
+    gap:14px;
+    margin:28px 0 22px;
+  }
+  .divider .line{
+    flex:1;
+    height:1px;
+    background:var(--border-strong);
+  }
+  .divider .label{
+    color:var(--green);
+    flex-shrink:0;
+  }
+  .grid{
+    display:grid;
+    grid-template-columns:1fr;
+    gap:14px;
+    margin-bottom:28px;
+  }
+  @media(min-width:640px){
+    .grid{grid-template-columns:1fr 1fr;}
+  }
+  .app-card{
+    background:var(--surface);
+    border:1px solid var(--border-strong);
+    border-radius:18px;
+    padding:24px;
+    display:block;
+    position:relative;
+    overflow:hidden;
+    transition:all 0.25s ease;
+    cursor:pointer;
+    animation:fadeUp 0.7s cubic-bezier(.22,.61,.36,1) backwards;
+  }
+  .app-card:nth-child(1){animation-delay:0.1s;}
+  .app-card:nth-child(2){animation-delay:0.2s;}
+  .app-card:hover{
+    border-color:var(--green);
+    background:rgba(121,181,83,0.08);
+    transform:translateY(-3px);
+    box-shadow:0 14px 40px rgba(0,0,0,0.4),0 0 0 1px var(--green);
+  }
+  .app-card .icon{
+    font-size:34px;
+    color:var(--green);
+    margin-bottom:14px;
+    line-height:1;
+  }
+  .app-card h2{
+    font-size:22px;
+    font-weight:800;
+    margin-bottom:6px;
+    color:var(--text);
+    letter-spacing:-0.01em;
+  }
+  .app-card .subtitle{
+    color:var(--green-l);
+    font-size:13px;
+    margin-bottom:14px;
+    font-style:italic;
+  }
+  .app-card .desc{
+    color:var(--muted);
+    font-size:13px;
+    line-height:1.6;
+    margin-bottom:16px;
+  }
+  .app-card .features{
+    list-style:none;
+    margin-bottom:18px;
+    padding:0;
+  }
+  .app-card .features li{
+    color:var(--muted);
+    font-size:12px;
+    padding:4px 0 4px 18px;
+    position:relative;
+  }
+  .app-card .features li::before{
+    content:"·";
+    color:var(--sun);
+    position:absolute;
+    left:6px;
+    top:1px;
+    font-size:18px;
+    line-height:1;
+    font-weight:700;
+  }
+  .app-card .open{
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    color:var(--sun);
+    font-size:12px;
+    letter-spacing:0.08em;
+    text-transform:uppercase;
+    font-family:'Courier New',monospace;
+    padding-top:14px;
+    border-top:1px solid var(--border);
+    transition:gap 0.2s;
+  }
+  .app-card:hover .open{gap:12px;}
+  .app-card .accent-bar{
+    position:absolute;
+    right:0;
+    bottom:0;
+    width:48px;
+    height:4px;
+    background:var(--sun);
+    opacity:0.7;
+  }
+  .app-card.studio .icon{color:var(--sun);}
+  .quote{
+    text-align:center;
+    margin:30px 0 22px;
+    color:var(--muted);
+    font-size:14px;
+    line-height:1.7;
+  }
+  .quote::before,.quote::after{
+    color:var(--green);
+    font-weight:700;
+  }
+  .quote::before{content:"« ";}
+  .quote::after{content:" »";}
+  footer{
+    text-align:center;
+    padding:24px 16px 18px;
+    border-top:1px solid var(--border);
+  }
+  footer .brand-line{
+    color:var(--green);
+    margin-bottom:6px;
+  }
+  footer .made-with{
+    color:rgba(245,242,232,0.3);
+    font-style:italic;
+    font-size:12px;
+  }
+  @keyframes fadeUp{
+    from{opacity:0;transform:translateY(12px);}
+    to{opacity:1;transform:none;}
+  }
+  .bg-deco{
+    position:fixed;
+    inset:0;
+    pointer-events:none;
+    z-index:-1;
+    background-image:radial-gradient(rgba(121,181,83,0.04) 1px,transparent 1px);
+    background-size:28px 28px;
+    background-position:0 0;
+    opacity:0.6;
+  }
+</style>
+</head>
+<body>
+<div class="bg-deco"></div>
+<div class="stripe"></div>
+
+<div class="container">
+  <header class="hero">
+    <div class="logo-wrap">
+      <img src="icon-512.png" alt="Huerta Agroecológica Siglo XXI" class="logo"/>
+    </div>
+    <div class="kicker mono">— Pigüé · Buenos Aires —</div>
+    <h1 class="brand">Huerta <em class="editorial">Siglo XXI</em></h1>
+    <p class="lead editorial">Agroecología, sintropia y agrofloresta. Una manera distinta de cultivar, vender y contar lo que hacemos.</p>
+  </header>
+
+  <div class="divider">
+    <div class="line"></div>
+    <div class="label mono">Aplicaciones</div>
+    <div class="line"></div>
+  </div>
+
+  <div class="grid">
+
+    <a class="app-card studio" href="diseno.html" aria-label="Abrir Estudio de Diseño">
+      <div class="icon">✦</div>
+      <h2>Estudio</h2>
+      <div class="subtitle">Diseño visual para redes</div>
+      <p class="desc">Convertí tus fotos en piezas listas para Instagram, Facebook y WhatsApp.</p>
+      <ul class="features">
+        <li>Editor con filtros y texto sobre la imagen</li>
+        <li>Modelos automáticos generados por IA</li>
+        <li>Plantillas de Stories prediseñadas</li>
+        <li>Collage, redimensionar, marca de agua</li>
+      </ul>
+      <span class="open">Abrir Estudio →</span>
+      <div class="accent-bar"></div>
+    </a>
+
+    <a class="app-card" href="asistente.html" aria-label="Abrir Asistente Integral">
+      <div class="icon">◉</div>
+      <h2>Asistente</h2>
+      <div class="subtitle">Gestión integral de la huerta</div>
+      <p class="desc">Pedidos, clientes, calendario y dos chats con IA: técnico y general.</p>
+      <ul class="features">
+        <li>Chat técnico de sintropia y agrofloresta</li>
+        <li>Gestión de pedidos manual o por WhatsApp</li>
+        <li>Calendario, cosechas, recetas, ideas</li>
+        <li>Estadísticas e historial del mes</li>
+      </ul>
+      <span class="open">Abrir Asistente →</span>
+      <div class="accent-bar" style="background:var(--green);"></div>
+    </a>
+
+  </div>
+
+  <p class="quote editorial">Sembrar es creer en el futuro.</p>
+
+  <div class="divider">
+    <div class="line"></div>
+    <div class="label mono">· Agroecología · Sintropia · Agrofloresta ·</div>
+    <div class="line"></div>
+  </div>
+
+</div>
+
+<footer>
+  <div class="brand-line mono">Huerta SXXI · 2026</div>
+  <div class="made-with">Hecho con cariño para la huerta.</div>
+</footer>
+
+<div class="stripe"></div>
+
+</body>
+</html>

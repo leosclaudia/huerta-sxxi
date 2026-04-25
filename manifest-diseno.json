@@ -1,0 +1,33 @@
+{
+  "name": "Huerta SXXI · Estudio",
+  "short_name": "Huerta Estudio",
+  "description": "Estudio editorial para la Huerta Agroecológica Siglo XXI",
+  "start_url": "./diseno.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0a0a0a",
+  "theme_color": "#79B553",
+  "orientation": "portrait-primary",
+  "lang": "es-AR",
+  "categories": ["productivity", "photo", "graphics"],
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

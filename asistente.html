@@ -1,0 +1,1242 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no"/>
+<title>Huerta SXXI · Asistente</title>
+<link rel="manifest" href="manifest-asistente.json"/>
+<link rel="icon" type="image/png" href="favicon-32.png"/>
+<link rel="apple-touch-icon" href="icon-192.png"/>
+<meta name="theme-color" content="#2E7D32"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-title" content="Huerta Asistente"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  :root{
+    --bg:#0a120d; --bg2:#0f1d15; --surface:rgba(255,255,255,0.04);
+    --border:rgba(255,255,255,0.08); --text:#eaf2ec; --muted:rgba(234,242,236,0.5);
+    --green:#4CAF50; --green-d:#2E7D32; --green-l:#81C784; --mint:#00c9a7;
+    --earth:#795548; --yellow:#F9A825; --red:#EF5350; --blue:#42A5F5;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+  html,body{overscroll-behavior:none;}
+  body{background:var(--bg);color:var(--text);font-family:Georgia,'Times New Roman',serif;line-height:1.5;}
+  button,input,select,textarea{font-family:inherit;}
+  select option{background:#0f1d15;color:#fff;}
+  ::-webkit-scrollbar{width:4px;height:4px;}
+  ::-webkit-scrollbar-thumb{background:rgba(76,175,80,0.4);border-radius:4px;}
+  input[type=range]{accent-color:var(--green);}
+  input[type=color]{cursor:pointer;border:none;border-radius:6px;background:transparent;}
+  textarea,input,select{outline:none;}
+  .brand{font-family:Georgia,serif;font-weight:800;letter-spacing:-0.02em;}
+  .mono{font-family:'Courier New',monospace;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .spin{animation:spin 0.8s linear infinite;display:inline-block;}
+  @keyframes fade{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}
+  .fade{animation:fade 0.3s ease;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.5;}}
+  .pulse{animation:pulse 1.5s ease-in-out infinite;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useRef,useEffect,useMemo}=React;
+
+// ============ CONSTANTES ============
+const GEMINI_KEY="AIzaSyDkO8xlXS9U0AWO5CUWSgmcwz24GEBaj4A";
+const BRAND_NAME="Huerta Agroecológica Siglo XXI";
+
+const MODULES=[
+  {id:"pedidos",label:"Pedidos",icon:"📋",desc:"Carga manual + IA desde WhatsApp"},
+  {id:"chatTec",label:"Chat Técnico",icon:"🌳",desc:"Sintropia, agrofloresta, agroecología"},
+  {id:"chatGen",label:"Chat General",icon:"💬",desc:"Ayudante para todo lo demás"},
+  {id:"productos",label:"Productos",icon:"🌱",desc:"Catálogo y precios"},
+  {id:"clientes",label:"Clientes",icon:"👥",desc:"Contactos y recurrencia"},
+  {id:"calendario",label:"Calendario",icon:"📅",desc:"Publicaciones y eventos"},
+  {id:"cosechas",label:"Cosechas",icon:"🥬",desc:"Registro de producción"},
+  {id:"recetas",label:"Recetas",icon:"🥗",desc:"Recetario con IA"},
+  {id:"ideas",label:"Ideas",icon:"💡",desc:"Ideas de contenido"},
+  {id:"historial",label:"Historial",icon:"📚",desc:"Lo ya publicado"},
+  {id:"stats",label:"Estadísticas",icon:"📊",desc:"Resumen del mes"},
+];
+
+// ============ STORAGE HELPER ============
+const store={
+  get:(k,def)=>{try{const v=localStorage.getItem("hs_"+k);return v?JSON.parse(v):def;}catch{return def;}},
+  set:(k,v)=>{try{localStorage.setItem("hs_"+k,JSON.stringify(v));}catch{}},
+};
+
+// ============ GEMINI ============
+const geminiCall=async(prompt,system)=>{
+  try{
+    const body={
+      contents:[{parts:[{text:prompt}]}],
+      generationConfig:{
+        temperature:0.85,
+        maxOutputTokens:8192,
+        thinkingConfig:{thinkingBudget:-1}
+      }
+    };
+    if(system)body.systemInstruction={parts:[{text:system}]};
+    const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!res.ok){
+      const errTxt=await res.text();
+      console.error("Gemini HTTP",res.status,errTxt);
+      return `⚠️ Error ${res.status}: ${errTxt.slice(0,200)}`;
+    }
+    const data=await res.json();
+    // Si bloquea por seguridad, lo informamos
+    if(data.promptFeedback?.blockReason){
+      return `⚠️ El pedido fue bloqueado: ${data.promptFeedback.blockReason}`;
+    }
+    const cand=data.candidates?.[0];
+    if(!cand)return "⚠️ La IA no devolvió respuesta. Probá reformulando la pregunta.";
+    // Combinar TODOS los parts que tengan texto (Gemini 2.5 puede devolver varios bloques)
+    const parts=cand.content?.parts||[];
+    const text=parts.map(p=>p.text||"").filter(Boolean).join("\n").trim();
+    if(!text){
+      const fr=cand.finishReason||"unknown";
+      console.warn("Gemini empty response. finishReason:",fr,"data:",data);
+      if(fr==="MAX_TOKENS")return "⚠️ La respuesta se cortó por largo. Probá una pregunta más específica.";
+      if(fr==="SAFETY")return "⚠️ La respuesta fue bloqueada por filtros de seguridad.";
+      if(fr==="RECITATION")return "⚠️ La IA no pudo responder (posible recitación). Reformulá la pregunta.";
+      return `⚠️ Respuesta vacía (motivo: ${fr}). Probá de nuevo o reformulá.`;
+    }
+    return text;
+  }catch(e){
+    console.error(e);
+    return "⚠️ Error de conexión: "+e.message;
+  }
+};
+
+const geminiJSON=async(prompt)=>{
+  const raw=await geminiCall(prompt);
+  const clean=raw.replace(/```json|```/g,"").trim();
+  try{return JSON.parse(clean);}catch{return null;}
+};
+
+// System prompts para los dos chats
+const SYS_TECNICO=`Sos experto/a en sintropia, agricultura sintrópica, agrofloresta, sistemas agroflorestales (SAF), agroecología, permacultura, manejo de suelos vivos, biofertilizantes, compostaje, asociaciones de cultivos, y manejo de bosques productivos. Conocés en profundidad la obra de Ernst Götsch (sintropia, regeneración de paisajes), Anna Lappé, Pierre Rabhi, los aportes de la agroecología latinoamericana (Altieri, Sevilla Guzmán), permacultura (Mollison, Holmgren), y el trabajo de productores como Juan Manuel Martínez Valdez en agricultura natural.
+
+Trabajás con la Huerta Agroecológica Siglo XXI en Pigüé, provincia de Buenos Aires (zona templada pampeana, suelos profundos, lluvias entre 700-900mm anuales, heladas de mayo a agosto, primaveras frescas y veranos calurosos). Tenelo siempre presente al dar recomendaciones.
+
+Hablás en español rioplatense con voseo, de forma cálida pero rigurosa. NO sos un manual: explicás bien, das contexto, contás el "por qué" detrás de cada técnica.
+
+REGLA CLAVE — adaptá la longitud según la pregunta:
+• Si la pregunta es corta o directa (un sí/no, una duda puntual), respondé corto y al grano (1-3 oraciones).
+• Si la pregunta es compleja, abierta, o sobre un tema profundo (sintropia, diseño de SAF, manejo de bosque, planificación de un sistema), DESARROLLÁ a fondo: estructurá con secciones, listá pasos concretos con cantidades/tiempos, mencioná ejemplos reales, citá autores cuando aporta, mencioná especies adaptadas a la zona templada pampeana, advertí sobre errores comunes. Buscá que el lector aprenda y se quede con algo aplicable.
+• Cuando hablen de SINTROPIA, AGROFLORESTA o BOSQUES, NO te quedes en la definición: explicá los estratos (emergente, alto, medio, bajo), la sucesión natural, las podas dinámicas, el rol de las pioneras, el principio de "muerte y descomposición = vida", ejemplos de especies por estrato adaptadas a Pigüé, errores típicos y cómo evitarlos. Estos temas merecen respuestas profundas.
+
+Si no estás seguro/a de algo, decilo. Nunca inventes datos numéricos. Si una pregunta cae fuera de tu expertise (sanidad humana, legal, etc.), recomendá consultar a quien corresponda.`;
+
+const SYS_GENERAL=`Sos asistente general de la Huerta Agroecológica Siglo XXI, ubicada en Pigüé, provincia de Buenos Aires. Ayudás con todo lo que no sea estrictamente técnico de cultivo: redactar mensajes a clientes, armar descripciones de productos, planificar la semana, sugerir ideas de contenido para redes, organizar pedidos, resolver dudas variadas del emprendimiento, redactar copies, sugerir respuestas profesionales pero cálidas a consultas.
+
+Hablás en español rioplatense con voseo, con una voz cálida, cercana, auténtica — la voz de un emprendimiento familiar que cuida lo que hace.
+
+REGLA CLAVE — adaptá la longitud según la pregunta:
+• Pregunta corta o directa → respuesta corta y útil (1-2 oraciones, o un mensaje listo para copiar).
+• Pregunta abierta o que pide pensar (planificá una semana, dame ideas, ayudame a redactar una propuesta, cómo respondo a este cliente difícil) → desarrollá: dame opciones, alternativas, fundamentos, mensajes listos para copiar, próximos pasos. Pensá como una socia del emprendimiento, no como un buscador.
+• Si pedís un mensaje/copy → da el texto listo para copiar, no me cuentes lo que vas a hacer.
+
+Si te falta información para responder bien (por ejemplo, una fecha, el nombre del cliente, el contexto), preguntá antes de inventar.
+Si algo cae fuera de tu rol (consulta médica, legal, contable formal), decilo y sugerí consultar al profesional.`;
+
+// ============ UI HELPERS ============
+const Card=({children,style,onClick})=>(
+  <div onClick={onClick} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:14,padding:14,cursor:onClick?"pointer":"default",transition:"all 0.2s",...style}}>{children}</div>
+);
+const Lbl=({children,style})=>(
+  <div style={{fontSize:10,color:"var(--muted)",marginBottom:6,textTransform:"uppercase",letterSpacing:1.5,fontFamily:"'Courier New',monospace",...style}}>{children}</div>
+);
+const Btn=({onClick,disabled,children,style,variant})=>{
+  const bg=variant==="ghost"?"transparent":variant==="soft"?"rgba(255,255,255,0.08)":variant==="danger"?"linear-gradient(135deg,#EF5350,#B71C1C)":"linear-gradient(135deg,var(--green),var(--mint))";
+  const border=variant==="ghost"?"1px solid var(--border)":"none";
+  return <button onClick={onClick} disabled={disabled} style={{padding:"11px 16px",borderRadius:10,border,background:disabled?"rgba(255,255,255,0.05)":bg,color:disabled?"rgba(255,255,255,0.3)":"#fff",fontWeight:600,fontSize:14,cursor:disabled?"not-allowed":"pointer",width:"100%",transition:"all 0.2s",letterSpacing:0.3,...style}}>{children}</button>;
+};
+const Pill=({active,children,onClick,color})=>(
+  <button onClick={onClick} style={{padding:"6px 12px",borderRadius:20,border:`1px solid ${active?(color||"var(--green)"):"var(--border)"}`,background:active?(color?color+"26":"rgba(76,175,80,0.15)"):"transparent",color:active?(color||"var(--green-l)"):"var(--muted)",fontSize:12,cursor:"pointer",whiteSpace:"nowrap",fontFamily:"inherit",transition:"all 0.2s"}}>{children}</button>
+);
+const Spinner=()=>(
+  <span className="spin" style={{display:"inline-block",width:14,height:14,border:"2px solid rgba(255,255,255,0.3)",borderTopColor:"#fff",borderRadius:"50%"}}/>
+);
+const Input=(props)=>(
+  <input {...props} style={{width:"100%",background:"rgba(255,255,255,0.05)",border:"1px solid var(--border)",borderRadius:8,padding:10,color:"#fff",fontSize:14,fontFamily:"inherit",...props.style}}/>
+);
+const TA=(props)=>(
+  <textarea {...props} style={{width:"100%",background:"rgba(255,255,255,0.05)",border:"1px solid var(--border)",borderRadius:8,padding:10,color:"#fff",fontSize:14,fontFamily:"inherit",resize:"vertical",minHeight:70,...props.style}}/>
+);
+
+const todayISO=()=>new Date().toISOString().split("T")[0];
+const fmtDate=iso=>{if(!iso)return "";const d=new Date(iso+(iso.length===10?"T12:00:00":""));return d.toLocaleDateString("es-AR",{day:"2-digit",month:"short"});};
+const fmtMoney=n=>"$"+(+n||0).toLocaleString("es-AR");
+
+// Mini renderer de Markdown (negritas, cursivas, listas, títulos, código)
+// No usa dangerouslySetInnerHTML — todo es JSX seguro
+const escapeHTML=s=>s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const renderInline=(text,key="i")=>{
+  // Procesa **negrita**, *cursiva*, `código`, [link](url)
+  const parts=[];
+  let i=0,k=0;
+  const re=/(\*\*[^*\n]+\*\*|\*[^*\n]+\*|`[^`\n]+`|\[[^\]]+\]\([^)]+\))/g;
+  let m,lastEnd=0;
+  while((m=re.exec(text))!==null){
+    if(m.index>lastEnd)parts.push(text.slice(lastEnd,m.index));
+    const tok=m[0];
+    if(tok.startsWith("**"))parts.push(<strong key={key+"-"+(k++)} style={{color:"#fff"}}>{tok.slice(2,-2)}</strong>);
+    else if(tok.startsWith("`"))parts.push(<code key={key+"-"+(k++)} style={{background:"rgba(255,255,255,0.1)",padding:"1px 5px",borderRadius:4,fontFamily:"'Courier New',monospace",fontSize:"0.9em"}}>{tok.slice(1,-1)}</code>);
+    else if(tok.startsWith("*"))parts.push(<em key={key+"-"+(k++)}>{tok.slice(1,-1)}</em>);
+    else if(tok.startsWith("[")){
+      const lm=tok.match(/\[([^\]]+)\]\(([^)]+)\)/);
+      if(lm)parts.push(<a key={key+"-"+(k++)} href={lm[2]} target="_blank" rel="noreferrer" style={{color:"var(--green-l)",textDecoration:"underline"}}>{lm[1]}</a>);
+    }
+    lastEnd=m.index+tok.length;
+  }
+  if(lastEnd<text.length)parts.push(text.slice(lastEnd));
+  return parts;
+};
+const Markdown=({text})=>{
+  if(!text)return null;
+  const lines=text.split("\n");
+  const out=[];
+  let i=0;
+  while(i<lines.length){
+    const line=lines[i];
+    // Heading
+    const h=line.match(/^(#{1,4})\s+(.+)$/);
+    if(h){
+      const lvl=h[1].length;
+      const sizes={1:18,2:16,3:15,4:14};
+      out.push(<div key={i} style={{fontWeight:700,fontSize:sizes[lvl],marginTop:i>0?10:0,marginBottom:6,color:"var(--green-l)"}}>{renderInline(h[2],"h"+i)}</div>);
+      i++;continue;
+    }
+    // Lista (- o •)
+    if(/^[\s]*[-•*]\s+/.test(line)){
+      const items=[];
+      while(i<lines.length&&/^[\s]*[-•*]\s+/.test(lines[i])){
+        items.push(lines[i].replace(/^[\s]*[-•*]\s+/,""));
+        i++;
+      }
+      out.push(<ul key={"u"+i} style={{margin:"6px 0",paddingLeft:18}}>{items.map((it,k)=><li key={k} style={{marginBottom:3,color:"var(--text)"}}>{renderInline(it,"li"+i+"-"+k)}</li>)}</ul>);
+      continue;
+    }
+    // Lista numerada
+    if(/^[\s]*\d+\.\s+/.test(line)){
+      const items=[];
+      while(i<lines.length&&/^[\s]*\d+\.\s+/.test(lines[i])){
+        items.push(lines[i].replace(/^[\s]*\d+\.\s+/,""));
+        i++;
+      }
+      out.push(<ol key={"o"+i} style={{margin:"6px 0",paddingLeft:22}}>{items.map((it,k)=><li key={k} style={{marginBottom:3}}>{renderInline(it,"oli"+i+"-"+k)}</li>)}</ol>);
+      continue;
+    }
+    // Línea vacía
+    if(line.trim()===""){out.push(<div key={i} style={{height:8}}/>);i++;continue;}
+    // Párrafo simple
+    out.push(<div key={i} style={{marginBottom:4}}>{renderInline(line,"p"+i)}</div>);
+    i++;
+  }
+  return <>{out}</>;
+};
+
+// ============ APP ============
+function App(){
+  const [view,setView]=useState("home");
+
+  // ========= DATOS PERSISTENTES =========
+  const [pedidos,setPedidos]=useState(()=>store.get("pedidos",[]));
+  const [productos,setProductos]=useState(()=>store.get("productos",[
+    {id:1,nombre:"Lechuga crespa",precio:800,unidad:"planta",categoria:"Verduras",stock:20},
+    {id:2,nombre:"Tomate cherry",precio:2500,unidad:"kg",categoria:"Verduras",stock:5},
+    {id:3,nombre:"Huevos caseros",precio:4000,unidad:"docena",categoria:"Otros",stock:10},
+  ]));
+  const [clientes,setClientes]=useState(()=>store.get("clientes",[]));
+  const [eventos,setEventos]=useState(()=>store.get("eventos",[]));
+  const [cosechas,setCosechas]=useState(()=>store.get("cosechas",[]));
+  const [recetas,setRecetas]=useState(()=>store.get("recetas",[]));
+  const [ideas,setIdeas]=useState(()=>store.get("ideas",[]));
+  const [historial,setHistorial]=useState(()=>store.get("historial",[]));
+  const [chatTecHist,setChatTecHist]=useState(()=>store.get("chatTec",[]));
+  const [chatGenHist,setChatGenHist]=useState(()=>store.get("chatGen",[]));
+
+  // Persist changes
+  useEffect(()=>store.set("pedidos",pedidos),[pedidos]);
+  useEffect(()=>store.set("productos",productos),[productos]);
+  useEffect(()=>store.set("clientes",clientes),[clientes]);
+  useEffect(()=>store.set("eventos",eventos),[eventos]);
+  useEffect(()=>store.set("cosechas",cosechas),[cosechas]);
+  useEffect(()=>store.set("recetas",recetas),[recetas]);
+  useEffect(()=>store.set("ideas",ideas),[ideas]);
+  useEffect(()=>store.set("historial",historial),[historial]);
+  useEffect(()=>store.set("chatTec",chatTecHist),[chatTecHist]);
+  useEffect(()=>store.set("chatGen",chatGenHist),[chatGenHist]);
+
+  // ========= PEDIDOS =========
+  const [pedidoMode,setPedidoMode]=useState("lista"); // lista|manual|whatsapp
+  const [wspText,setWspText]=useState("");
+  const [wspBusy,setWspBusy]=useState(false);
+  const [formPedido,setFormPedido]=useState({cliente:"",telefono:"",items:"",entrega:todayISO(),pago:"pendiente",nota:""});
+  const [filterEstado,setFilterEstado]=useState("todos");
+
+  const parseWhatsapp=async()=>{
+    if(!wspText.trim())return;
+    setWspBusy(true);
+    const prods=productos.map(p=>`${p.nombre} ($${p.precio}/${p.unidad})`).join(", ");
+    const prompt=`Sos asistente de la huerta. Extraé de este mensaje de WhatsApp los datos del pedido. Productos disponibles: ${prods}. Si el cliente pide un producto con variaciones de nombre, mapealo al producto más cercano. Si no existe un producto mencionado, ponelo igual en items con "sin stock" en nota. Mensaje: "${wspText}". Respondé SOLO JSON sin markdown: {"cliente":"nombre detectado o 'sin nombre'","telefono":"si aparece o ''","items":[{"nombre":"","cantidad":1,"precio":0,"unidad":""}],"total":0,"entrega":"YYYY-MM-DD si la pide, sino hoy ${todayISO()}","nota":"observaciones"}`;
+    const data=await geminiJSON(prompt);
+    if(data){
+      const nuevo={
+        id:Date.now(),
+        fecha:todayISO(),
+        cliente:data.cliente||"Sin nombre",
+        telefono:data.telefono||"",
+        items:Array.isArray(data.items)?data.items:[],
+        total:data.total||0,
+        entrega:data.entrega||todayISO(),
+        pago:"pendiente",
+        estado:"nuevo",
+        nota:data.nota||"",
+        fuente:"whatsapp",
+      };
+      setPedidos(p=>[nuevo,...p]);
+      setWspText("");
+      setPedidoMode("lista");
+      alert("✅ Pedido creado. Revisalo y ajustá si hace falta.");
+    }else{
+      alert("❌ No pude interpretar el mensaje. Probá con el formulario manual.");
+    }
+    setWspBusy(false);
+  };
+
+  const addPedidoManual=()=>{
+    if(!formPedido.cliente||!formPedido.items)return;
+    // Parsear items del texto: "2 lechugas, 1 docena de huevos"
+    const items=formPedido.items.split(/[,\n]/).map(s=>s.trim()).filter(Boolean).map(linea=>{
+      const m=linea.match(/^(\d+)\s*(?:x\s*)?(.+?)(?:\s*\$?(\d+))?$/);
+      if(!m)return {nombre:linea,cantidad:1,precio:0,unidad:""};
+      const nombre=m[2].trim();
+      const prod=productos.find(p=>p.nombre.toLowerCase().includes(nombre.toLowerCase())||nombre.toLowerCase().includes(p.nombre.toLowerCase()));
+      return {nombre:prod?prod.nombre:nombre,cantidad:+m[1],precio:+m[3]||(prod?.precio||0),unidad:prod?.unidad||""};
+    });
+    const total=items.reduce((s,i)=>s+i.cantidad*i.precio,0);
+    const nuevo={id:Date.now(),fecha:todayISO(),...formPedido,items,total,estado:"nuevo",fuente:"manual"};
+    setPedidos(p=>[nuevo,...p]);
+    // Cliente a la base si tiene teléfono
+    if(formPedido.telefono&&!clientes.find(c=>c.telefono===formPedido.telefono)){
+      setClientes(c=>[...c,{id:Date.now(),nombre:formPedido.cliente,telefono:formPedido.telefono,pedidos:1,fechaAlta:todayISO()}]);
+    }else if(formPedido.telefono){
+      setClientes(c=>c.map(x=>x.telefono===formPedido.telefono?{...x,pedidos:(x.pedidos||0)+1}:x));
+    }
+    setFormPedido({cliente:"",telefono:"",items:"",entrega:todayISO(),pago:"pendiente",nota:""});
+    setPedidoMode("lista");
+  };
+
+  const cambiarEstado=(id,estado)=>{
+    setPedidos(p=>p.map(x=>x.id===id?{...x,estado}:x));
+  };
+  const eliminarPedido=id=>{
+    if(!confirm("¿Eliminar este pedido?"))return;
+    setPedidos(p=>p.filter(x=>x.id!==id));
+  };
+  const copiarWspPedido=p=>{
+    const lineas=[`🌱 *${BRAND_NAME}*`,`Pedido #${p.id}`,"",...p.items.map(i=>`• ${i.cantidad} ${i.unidad||""} ${i.nombre} — ${fmtMoney(i.cantidad*i.precio)}`),"",`*Total: ${fmtMoney(p.total)}*`,`Entrega: ${fmtDate(p.entrega)}`,p.nota?`\n_${p.nota}_`:""].join("\n");
+    navigator.clipboard?.writeText(lineas).then(()=>alert("✅ Mensaje copiado"));
+  };
+
+  const pedidosFiltrados=useMemo(()=>
+    filterEstado==="todos"?pedidos:pedidos.filter(p=>p.estado===filterEstado)
+  ,[pedidos,filterEstado]);
+
+  // ========= CHATS IA =========
+  const [chatTecInput,setChatTecInput]=useState("");
+  const [chatGenInput,setChatGenInput]=useState("");
+  const [chatTecBusy,setChatTecBusy]=useState(false);
+  const [chatGenBusy,setChatGenBusy]=useState(false);
+  const chatTecRef=useRef();
+  const chatGenRef=useRef();
+
+  useEffect(()=>{if(chatTecRef.current)chatTecRef.current.scrollTop=chatTecRef.current.scrollHeight;},[chatTecHist,chatTecBusy]);
+  useEffect(()=>{if(chatGenRef.current)chatGenRef.current.scrollTop=chatGenRef.current.scrollHeight;},[chatGenHist,chatGenBusy]);
+
+  const sendChat=async(tipo)=>{
+    const input=tipo==="tec"?chatTecInput:chatGenInput;
+    if(!input.trim())return;
+    const setInput=tipo==="tec"?setChatTecInput:setChatGenInput;
+    const setHist=tipo==="tec"?setChatTecHist:setChatGenHist;
+    const hist=tipo==="tec"?chatTecHist:chatGenHist;
+    const setBusy=tipo==="tec"?setChatTecBusy:setChatGenBusy;
+    const sys=tipo==="tec"?SYS_TECNICO:SYS_GENERAL;
+    setInput("");setBusy(true);
+    const userMsg={role:"user",content:input,t:Date.now()};
+    setHist(h=>[...h,userMsg]);
+    // Construimos contexto con últimos 6 mensajes
+    const ctx=[...hist.slice(-6),userMsg].map(m=>`${m.role==="user"?"Usuario":"Asistente"}: ${m.content}`).join("\n\n");
+    const resp=await geminiCall(ctx+"\n\nAsistente:",sys);
+    setHist(h=>[...h,{role:"assistant",content:resp,t:Date.now()}]);
+    setBusy(false);
+  };
+  const clearChat=tipo=>{
+    if(!confirm("¿Borrar toda la conversación?"))return;
+    if(tipo==="tec")setChatTecHist([]);else setChatGenHist([]);
+  };
+
+  const ChatView=({tipo})=>{
+    const hist=tipo==="tec"?chatTecHist:chatGenHist;
+    const input=tipo==="tec"?chatTecInput:chatGenInput;
+    const setInput=tipo==="tec"?setChatTecInput:setChatGenInput;
+    const busy=tipo==="tec"?chatTecBusy:chatGenBusy;
+    const ref=tipo==="tec"?chatTecRef:chatGenRef;
+    const title=tipo==="tec"?"🌳 Chat Técnico":"💬 Chat General";
+    const subtitle=tipo==="tec"?"Sintropia · Agrofloresta · Agroecología":"Asistente para todo lo demás";
+    const suggestions=tipo==="tec"
+      ?["¿Cómo inicio un SAF?","Orden de siembra en sintropia","Preparar biofertilizante","Manejo del sombreado"]
+      :["Redactá respuesta para cliente","Idea de contenido para hoy","¿Qué sembrar esta semana?","Mensaje de presentación"];
+    return (
+      <div className="fade" style={{display:"flex",flexDirection:"column",height:"calc(100vh - 180px)"}}>
+        <Card style={{marginBottom:10,padding:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontWeight:600,fontSize:14}}>{title}</div>
+            <div style={{fontSize:11,color:"var(--muted)"}}>{subtitle}</div>
+          </div>
+          {hist.length>0&&<button onClick={()=>clearChat(tipo)} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--muted)",borderRadius:6,padding:"4px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>🗑 Limpiar</button>}
+        </Card>
+
+        <div ref={ref} style={{flex:1,overflowY:"auto",background:"rgba(0,0,0,0.2)",borderRadius:12,padding:12,marginBottom:10,border:"1px solid var(--border)"}}>
+          {hist.length===0&&(
+            <div style={{textAlign:"center",color:"var(--muted)",padding:"20px 10px"}}>
+              <div style={{fontSize:32,marginBottom:10}}>{tipo==="tec"?"🌳":"💬"}</div>
+              <div style={{fontSize:13,marginBottom:14}}>Preguntame lo que necesites</div>
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                {suggestions.map(s=><button key={s} onClick={()=>setInput(s)} style={{background:"rgba(76,175,80,0.1)",border:"1px solid rgba(76,175,80,0.3)",color:"var(--green-l)",borderRadius:8,padding:"8px 12px",fontSize:12,cursor:"pointer",fontFamily:"inherit",textAlign:"left"}}>→ {s}</button>)}
+              </div>
+            </div>
+          )}
+          {hist.map((m,i)=>(
+            <div key={i} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start",marginBottom:10}}>
+              <div style={{maxWidth:"88%",padding:"11px 15px",borderRadius:14,background:m.role==="user"?"linear-gradient(135deg,var(--green),var(--green-d))":"rgba(255,255,255,0.06)",border:m.role==="assistant"?"1px solid var(--border)":"none",fontSize:13,lineHeight:1.6,whiteSpace:m.role==="user"?"pre-wrap":"normal",wordBreak:"break-word"}}>
+                {m.role==="user"?m.content:<Markdown text={m.content}/>}
+              </div>
+            </div>
+          ))}
+          {busy&&<div style={{display:"flex",gap:8,alignItems:"center",color:"var(--muted)",fontSize:12,padding:10}}><Spinner/> Pensando...</div>}
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          <textarea value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendChat(tipo);}}} placeholder={tipo==="tec"?"Consulta técnica...":"Qué necesitás?"} style={{flex:1,background:"rgba(255,255,255,0.05)",border:"1px solid var(--border)",borderRadius:10,padding:10,color:"#fff",fontSize:13,fontFamily:"inherit",resize:"none",minHeight:44,maxHeight:120}}/>
+          <button onClick={()=>sendChat(tipo)} disabled={busy||!input.trim()} style={{background:busy||!input.trim()?"rgba(255,255,255,0.05)":"linear-gradient(135deg,var(--green),var(--mint))",border:"none",color:"#fff",borderRadius:10,padding:"0 14px",cursor:busy?"wait":"pointer",fontSize:16,minWidth:44}}>➤</button>
+        </div>
+      </div>
+    );
+  };
+
+  // ========= PRODUCTOS =========
+  const [prodMode,setProdMode]=useState("lista");
+  const [prodForm,setProdForm]=useState({nombre:"",precio:"",unidad:"",categoria:"Verduras",stock:""});
+  const [prodEdit,setProdEdit]=useState(null);
+
+  const saveProducto=()=>{
+    if(!prodForm.nombre||!prodForm.precio)return;
+    if(prodEdit){
+      setProductos(ps=>ps.map(p=>p.id===prodEdit?{...p,...prodForm,precio:+prodForm.precio,stock:+prodForm.stock||0}:p));
+    }else{
+      setProductos(ps=>[...ps,{id:Date.now(),...prodForm,precio:+prodForm.precio,stock:+prodForm.stock||0}]);
+    }
+    setProdForm({nombre:"",precio:"",unidad:"",categoria:"Verduras",stock:""});
+    setProdEdit(null);setProdMode("lista");
+  };
+  const editProducto=p=>{
+    setProdForm({nombre:p.nombre,precio:""+p.precio,unidad:p.unidad,categoria:p.categoria||"Verduras",stock:""+(p.stock||0)});
+    setProdEdit(p.id);setProdMode("form");
+  };
+  const deleteProducto=id=>{
+    if(!confirm("¿Eliminar este producto?"))return;
+    setProductos(ps=>ps.filter(p=>p.id!==id));
+  };
+  const categorias=["Verduras","Frutas","Hierbas","Elaborados","Otros"];
+
+  // ========= CLIENTES =========
+  const [cliForm,setCliForm]=useState({nombre:"",telefono:"",nota:""});
+  const [cliEdit,setCliEdit]=useState(null);
+  const [cliMode,setCliMode]=useState("lista");
+  const saveCliente=()=>{
+    if(!cliForm.nombre)return;
+    if(cliEdit){
+      setClientes(cs=>cs.map(c=>c.id===cliEdit?{...c,...cliForm}:c));
+    }else{
+      setClientes(cs=>[...cs,{id:Date.now(),...cliForm,pedidos:0,fechaAlta:todayISO()}]);
+    }
+    setCliForm({nombre:"",telefono:"",nota:""});setCliEdit(null);setCliMode("lista");
+  };
+  const editCliente=c=>{
+    setCliForm({nombre:c.nombre,telefono:c.telefono||"",nota:c.nota||""});
+    setCliEdit(c.id);setCliMode("form");
+  };
+  const deleteCliente=id=>{
+    if(!confirm("¿Eliminar cliente?"))return;
+    setClientes(cs=>cs.filter(c=>c.id!==id));
+  };
+
+  // ========= CALENDARIO =========
+  const [evForm,setEvForm]=useState({titulo:"",fecha:todayISO(),hora:"10:00",tipo:"publicacion",nota:""});
+  const [evMode,setEvMode]=useState("lista");
+  const [calMes,setCalMes]=useState(()=>new Date());
+  const saveEvento=()=>{
+    if(!evForm.titulo)return;
+    setEventos(es=>[...es,{id:Date.now(),...evForm}]);
+    setEvForm({titulo:"",fecha:todayISO(),hora:"10:00",tipo:"publicacion",nota:""});
+    setEvMode("lista");
+  };
+  const deleteEvento=id=>setEventos(es=>es.filter(e=>e.id!==id));
+  const EV_TIPOS={publicacion:{label:"Publicación",icon:"📱",color:"#4CAF50"},taller:{label:"Taller",icon:"📚",color:"#1565C0"},entrega:{label:"Entrega",icon:"🚚",color:"#F9A825"},feria:{label:"Feria",icon:"🏪",color:"#BF360C"},siembra:{label:"Siembra",icon:"🌱",color:"#2E7D32"},otro:{label:"Otro",icon:"📌",color:"#795548"}};
+
+  // Vista calendario mensual
+  const mesNombre=calMes.toLocaleDateString("es-AR",{month:"long",year:"numeric"});
+  const diasDelMes=(()=>{
+    const y=calMes.getFullYear(),m=calMes.getMonth();
+    const primero=new Date(y,m,1);
+    const diaSemInicio=(primero.getDay()+6)%7; // lunes=0
+    const ultimo=new Date(y,m+1,0).getDate();
+    const arr=[];
+    for(let i=0;i<diaSemInicio;i++)arr.push(null);
+    for(let i=1;i<=ultimo;i++){
+      const iso=`${y}-${String(m+1).padStart(2,"0")}-${String(i).padStart(2,"0")}`;
+      const evs=eventos.filter(e=>e.fecha===iso);
+      arr.push({dia:i,iso,evs,isToday:iso===todayISO()});
+    }
+    return arr;
+  })();
+  const evsHoy=eventos.filter(e=>e.fecha===todayISO()).sort((a,b)=>a.hora.localeCompare(b.hora));
+  const evsProximos=eventos.filter(e=>e.fecha>todayISO()).sort((a,b)=>(a.fecha+a.hora).localeCompare(b.fecha+b.hora)).slice(0,5);
+
+  // ========= COSECHAS =========
+  const [cosForm,setCosForm]=useState({producto:"",cantidad:"",unidad:"kg",fecha:todayISO(),nota:""});
+  const addCosecha=()=>{
+    if(!cosForm.producto||!cosForm.cantidad)return;
+    setCosechas(cs=>[{id:Date.now(),...cosForm,cantidad:+cosForm.cantidad},...cs]);
+    setCosForm({producto:"",cantidad:"",unidad:"kg",fecha:todayISO(),nota:""});
+  };
+  const deleteCosecha=id=>setCosechas(cs=>cs.filter(c=>c.id!==id));
+
+  // ========= RECETAS =========
+  const [recForm,setRecForm]=useState({nombre:"",ingredientes:"",preparacion:"",temporada:""});
+  const [recGenBusy,setRecGenBusy]=useState(false);
+  const [recGenIngr,setRecGenIngr]=useState("");
+  const saveReceta=()=>{
+    if(!recForm.nombre||!recForm.ingredientes)return;
+    setRecetas(rs=>[{id:Date.now(),...recForm,fecha:todayISO()},...rs]);
+    setRecForm({nombre:"",ingredientes:"",preparacion:"",temporada:""});
+  };
+  const generarReceta=async()=>{
+    if(!recGenIngr.trim())return;
+    setRecGenBusy(true);
+    const data=await geminiJSON(`Sos cocinera experta en cocina natural de temporada. Creá una receta usando estos ingredientes de la huerta: "${recGenIngr}". Debe ser simple, apta para compartir en redes de la Huerta Agroecológica Siglo XXI. Respondé SOLO JSON sin markdown: {"nombre":"...","ingredientes":"- ...\\n- ...","preparacion":"1. ...\\n2. ...","temporada":"primavera/verano/otoño/invierno"}`);
+    if(data)setRecForm({nombre:data.nombre||"",ingredientes:data.ingredientes||"",preparacion:data.preparacion||"",temporada:data.temporada||""});
+    setRecGenBusy(false);
+  };
+  const deleteReceta=id=>setRecetas(rs=>rs.filter(r=>r.id!==id));
+
+  // ========= IDEAS DE CONTENIDO =========
+  const [ideasBusy,setIdeasBusy]=useState(false);
+  const [ideasTema,setIdeasTema]=useState("");
+  const generarIdeas=async()=>{
+    setIdeasBusy(true);
+    const prompt=`Sos creador/a de contenido de la Huerta Agroecológica Siglo XXI (Pigüé, Buenos Aires, Argentina). Escribís en español rioplatense con voseo, voz cálida y auténtica de emprendimiento familiar.
+
+Generá 5 ideas de contenido para redes sociales. ${ideasTema.trim()?`Foco temático del usuario: "${ideasTema}". `:""}Variá entre estos tipos para que las 5 ideas no sean parecidas:
+- Educativo profundo (sintropia, agrofloresta, manejo de suelo, plantas asociadas, biofertilizantes)
+- Producto / cosecha (qué tenés disponible, cómo se cultivó)
+- Taller o evento (invitación, propuesta de valor)
+- Detrás de escena / historia / comunidad (proceso, manos trabajando, momento del año)
+- Tip práctico para el lector (algo accionable que puedan probar en casa)
+
+Para cada idea dame:
+- titulo: frase llamativa de 4 a 8 palabras
+- formato: uno de "post", "carrusel", "reel", "story", "video"
+- copy: el texto que se publica DEBAJO de la imagen, entre 50 y 120 palabras. Tiene que ser auténtico, contar algo, invitar a interactuar. NO uses frases hechas tipo "directo del campo a tu mesa". Buscá originalidad.
+- hashtags: 5 a 8 hashtags relevantes (incluir #HuertaSXXI #Agroecologia #Pigue y otros que correspondan al tema)
+- llamadoAccion: 1 frase corta al final que invite a comentar/compartir/visitar
+
+Respondé SÓLO JSON sin markdown ni explicaciones: {"ideas":[{"titulo":"","formato":"","copy":"","hashtags":"","llamadoAccion":""}]}`;
+    const data=await geminiJSON(prompt);
+    if(data?.ideas){
+      const nuevas=data.ideas.map(i=>({id:Date.now()+Math.random(),...i,fecha:todayISO(),usada:false}));
+      setIdeas(is=>[...nuevas,...is]);
+    }else{
+      alert("No se pudo generar ideas. Probá con un tema más concreto o reintentá.");
+    }
+    setIdeasBusy(false);
+  };
+  const marcarUsada=(id,usada)=>setIdeas(is=>is.map(i=>i.id===id?{...i,usada}:i));
+  const moverAHistorial=idea=>{
+    setHistorial(h=>[{id:Date.now(),titulo:idea.titulo,formato:idea.formato,copy:idea.copy,fecha:todayISO()},...h]);
+    setIdeas(is=>is.filter(i=>i.id!==idea.id));
+  };
+  const deleteIdea=id=>setIdeas(is=>is.filter(i=>i.id!==id));
+
+  // ========= HISTORIAL =========
+  const [histForm,setHistForm]=useState({titulo:"",formato:"post",copy:"",nota:""});
+  const [histMode,setHistMode]=useState("lista");
+  const addHistorial=()=>{
+    if(!histForm.titulo)return;
+    setHistorial(h=>[{id:Date.now(),...histForm,fecha:todayISO()},...h]);
+    setHistForm({titulo:"",formato:"post",copy:"",nota:""});
+    setHistMode("lista");
+  };
+  const deleteHist=id=>setHistorial(h=>h.filter(x=>x.id!==id));
+
+  // ========= ESTADISTICAS =========
+  const stats=useMemo(()=>{
+    const hoy=new Date();
+    const mesActual=hoy.toISOString().slice(0,7);
+    const pedMes=pedidos.filter(p=>p.fecha?.startsWith(mesActual));
+    const pedSem=pedidos.filter(p=>{const d=new Date(p.fecha+"T12:00:00");return (hoy-d)/86400000<7;});
+    const totalMes=pedMes.reduce((s,p)=>s+(p.total||0),0);
+    const entregados=pedMes.filter(p=>p.estado==="entregado").length;
+    const pendientes=pedidos.filter(p=>p.estado!=="entregado"&&p.estado!=="cancelado").length;
+    const cosMes=cosechas.filter(c=>c.fecha?.startsWith(mesActual));
+    const totalCos=cosMes.reduce((s,c)=>s+(+c.cantidad||0),0);
+    // Top productos
+    const contProd={};
+    pedMes.forEach(p=>p.items?.forEach(i=>{contProd[i.nombre]=(contProd[i.nombre]||0)+(i.cantidad||0);}));
+    const top=Object.entries(contProd).sort((a,b)=>b[1]-a[1]).slice(0,3);
+    // Top clientes
+    const contCli={};
+    pedMes.forEach(p=>{if(p.cliente&&p.cliente!=="Sin nombre")contCli[p.cliente]=(contCli[p.cliente]||0)+1;});
+    const topCli=Object.entries(contCli).sort((a,b)=>b[1]-a[1]).slice(0,3);
+    return {pedMes:pedMes.length,pedSem:pedSem.length,totalMes,entregados,pendientes,totalCos,cosMes:cosMes.length,top,topCli,eventosMes:eventos.filter(e=>e.fecha?.startsWith(mesActual)).length,ideasMes:ideas.filter(i=>i.fecha?.startsWith(mesActual)).length,histMes:historial.filter(h=>h.fecha?.startsWith(mesActual)).length};
+  },[pedidos,cosechas,eventos,ideas,historial]);
+
+  // ========= EXPORTAR / IMPORTAR DATOS =========
+  const exportarDatos=()=>{
+    const data={pedidos,productos,clientes,eventos,cosechas,recetas,ideas,historial,chatTec:chatTecHist,chatGen:chatGenHist,exportadoEl:new Date().toISOString()};
+    const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+    const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`huerta-backup-${todayISO()}.json`;a.click();
+  };
+  const importarRef=useRef();
+  const importarDatos=e=>{
+    const f=e.target.files?.[0];if(!f)return;
+    const r=new FileReader();
+    r.onload=ev=>{
+      try{
+        const d=JSON.parse(ev.target.result);
+        if(!confirm("Esto reemplazará todos tus datos actuales. ¿Continuar?"))return;
+        if(d.pedidos)setPedidos(d.pedidos);
+        if(d.productos)setProductos(d.productos);
+        if(d.clientes)setClientes(d.clientes);
+        if(d.eventos)setEventos(d.eventos);
+        if(d.cosechas)setCosechas(d.cosechas);
+        if(d.recetas)setRecetas(d.recetas);
+        if(d.ideas)setIdeas(d.ideas);
+        if(d.historial)setHistorial(d.historial);
+        if(d.chatTec)setChatTecHist(d.chatTec);
+        if(d.chatGen)setChatGenHist(d.chatGen);
+        alert("✅ Datos importados correctamente");
+      }catch{alert("❌ Archivo inválido");}
+    };
+    r.readAsText(f);
+    e.target.value="";
+  };
+
+  // ============ RENDER ============
+  return (
+    <div style={{minHeight:"100vh",background:"radial-gradient(ellipse at top, #0f1d15 0%, #0a120d 60%, #05090a 100%)",display:"flex",flexDirection:"column"}}>
+      <header style={{position:"sticky",top:0,zIndex:50,background:"rgba(10,18,13,0.88)",backdropFilter:"blur(14px)",borderBottom:"1px solid var(--border)",padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer"}} onClick={()=>setView("home")}>
+          <img src="icon-192.png" alt="Huerta SXXI" style={{width:40,height:40,borderRadius:"50%",boxShadow:"0 2px 12px rgba(76,175,80,0.35)",flexShrink:0}}/>
+          <div>
+            <div className="brand" style={{fontSize:15,lineHeight:1.1}}>Huerta SXXI</div>
+            <div style={{fontSize:10,color:"var(--muted)",fontFamily:"'Courier New',monospace",letterSpacing:1}}>ASISTENTE</div>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          {stats.pendientes>0&&(
+            <button onClick={()=>setView("pedidos")} style={{background:"rgba(239,83,80,0.2)",border:"1px solid var(--red)",color:"var(--red)",borderRadius:8,padding:"6px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>📋 {stats.pendientes}</button>
+          )}
+          <input ref={importarRef} type="file" accept=".json" style={{display:"none"}} onChange={importarDatos}/>
+        </div>
+      </header>
+
+      {/* HOME */}
+      {view==="home"&&(
+        <main style={{flex:1,maxWidth:720,width:"100%",margin:"0 auto",padding:"20px 16px 100px"}}>
+          <div className="fade" style={{textAlign:"center",marginBottom:24,marginTop:8}}>
+            <div style={{fontSize:11,color:"var(--green-l)",fontFamily:"'Courier New',monospace",letterSpacing:3,marginBottom:8}}>— ASISTENTE —</div>
+            <h1 className="brand" style={{fontSize:30,lineHeight:1.1,marginBottom:10}}>Gestión integral<br/><em style={{color:"var(--green-l)",fontStyle:"italic"}}>de la huerta</em></h1>
+            <p style={{color:"var(--muted)",fontSize:13,maxWidth:380,margin:"0 auto"}}>Pedidos · Clientes · Producción · Contenido · Chat con IA</p>
+          </div>
+
+          {/* Resumen rápido */}
+          <Card style={{marginBottom:18,padding:16,background:"linear-gradient(135deg,rgba(76,175,80,0.12),rgba(0,201,167,0.06))",border:"1px solid rgba(76,175,80,0.3)"}}>
+            <Lbl style={{color:"var(--green-l)"}}>Resumen de hoy · {new Date().toLocaleDateString("es-AR",{weekday:"long",day:"numeric",month:"long"})}</Lbl>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:10}}>
+              <div><div style={{fontSize:20,fontWeight:700}}>{stats.pendientes}</div><div style={{fontSize:10,color:"var(--muted)"}}>Pedidos pendientes</div></div>
+              <div><div style={{fontSize:20,fontWeight:700}}>{evsHoy.length}</div><div style={{fontSize:10,color:"var(--muted)"}}>Eventos hoy</div></div>
+              <div><div style={{fontSize:20,fontWeight:700}}>{fmtMoney(stats.totalMes)}</div><div style={{fontSize:10,color:"var(--muted)"}}>Ventas del mes</div></div>
+            </div>
+            {evsHoy.length>0&&(
+              <div style={{marginTop:12,paddingTop:12,borderTop:"1px solid rgba(255,255,255,0.08)"}}>
+                <Lbl>Agenda de hoy</Lbl>
+                {evsHoy.slice(0,3).map(e=><div key={e.id} style={{fontSize:12,marginBottom:4}}>⏰ {e.hora} · {e.titulo}</div>)}
+              </div>
+            )}
+          </Card>
+
+          <Lbl style={{marginLeft:4}}>Módulos</Lbl>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            {MODULES.map(m=>{
+              const badge=m.id==="pedidos"&&stats.pendientes>0?stats.pendientes:m.id==="ideas"&&ideas.filter(i=>!i.usada).length>0?ideas.filter(i=>!i.usada).length:null;
+              return (
+                <Card key={m.id} onClick={()=>setView(m.id)} style={{cursor:"pointer",padding:14,minHeight:100,display:"flex",flexDirection:"column",justifyContent:"space-between",position:"relative"}}>
+                  {badge&&<div style={{position:"absolute",top:8,right:8,background:"var(--green)",color:"#fff",fontSize:10,fontWeight:700,padding:"2px 7px",borderRadius:10}}>{badge}</div>}
+                  <div style={{fontSize:24,marginBottom:4}}>{m.icon}</div>
+                  <div>
+                    <div style={{fontWeight:700,fontSize:13,marginBottom:2}}>{m.label}</div>
+                    <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.4}}>{m.desc}</div>
+                  </div>
+                </Card>
+              );
+            })}
+          </div>
+
+          {/* Utilidades */}
+          <Card style={{marginTop:18,padding:14}}>
+            <Lbl>Respaldo de datos</Lbl>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              <Btn onClick={exportarDatos} variant="soft" style={{fontSize:12,padding:"10px"}}>📤 Exportar</Btn>
+              <Btn onClick={()=>importarRef.current?.click()} variant="soft" style={{fontSize:12,padding:"10px"}}>📥 Importar</Btn>
+            </div>
+            <div style={{fontSize:10,color:"var(--muted)",marginTop:8,lineHeight:1.5}}>Todo se guarda en tu dispositivo. Exportá un respaldo cada tanto.</div>
+          </Card>
+
+          <div style={{textAlign:"center",marginTop:28,fontSize:10,color:"rgba(234,242,236,0.3)",fontFamily:"'Courier New',monospace",letterSpacing:2}}>
+            · AGROECOLOGÍA · SINTROPIA · AGROFLORESTA ·
+          </div>
+        </main>
+      )}
+
+      {/* NAV */}
+      {view!=="home"&&(
+        <nav style={{display:"flex",gap:6,padding:"10px 12px",overflowX:"auto",borderBottom:"1px solid var(--border)",background:"rgba(10,18,13,0.4)"}}>
+          <button onClick={()=>setView("home")} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--muted)",borderRadius:8,padding:"6px 10px",fontSize:12,cursor:"pointer",whiteSpace:"nowrap",flexShrink:0,fontFamily:"inherit"}}>← Inicio</button>
+          {MODULES.map(m=>(
+            <Pill key={m.id} active={view===m.id} onClick={()=>setView(m.id)}>{m.icon} {m.label}</Pill>
+          ))}
+        </nav>
+      )}
+
+      {view!=="home"&&(
+        <main style={{flex:1,maxWidth:760,width:"100%",margin:"0 auto",padding:"14px 16px 100px"}}>
+
+          {/* ========= PEDIDOS ========= */}
+          {view==="pedidos"&&(
+            <div className="fade">
+              <div style={{display:"flex",gap:6,marginBottom:14}}>
+                <Pill active={pedidoMode==="lista"} onClick={()=>setPedidoMode("lista")}>📋 Lista ({pedidos.length})</Pill>
+                <Pill active={pedidoMode==="manual"} onClick={()=>setPedidoMode("manual")}>✍️ Cargar</Pill>
+                <Pill active={pedidoMode==="whatsapp"} onClick={()=>setPedidoMode("whatsapp")}>💬 Desde WhatsApp</Pill>
+              </div>
+
+              {pedidoMode==="whatsapp"&&(
+                <Card>
+                  <Lbl>Pegá un mensaje de WhatsApp, la IA lo convierte en pedido</Lbl>
+                  <TA value={wspText} onChange={e=>setWspText(e.target.value)} placeholder={"Ejemplo:\nHola! Soy Ana del 2921-112233. ¿Te quedan tomates cherry? Querría 1kg y 2 lechugas. Lo paso a buscar el sábado"} style={{minHeight:140,marginBottom:10}}/>
+                  <Btn onClick={parseWhatsapp} disabled={wspBusy||!wspText.trim()}>{wspBusy?<><Spinner/> &nbsp;Procesando...</>:"✨ Convertir en pedido"}</Btn>
+                </Card>
+              )}
+
+              {pedidoMode==="manual"&&(
+                <Card>
+                  <Lbl>Nuevo pedido manual</Lbl>
+                  <Input value={formPedido.cliente} onChange={e=>setFormPedido(f=>({...f,cliente:e.target.value}))} placeholder="Nombre del cliente" style={{marginBottom:8}}/>
+                  <Input value={formPedido.telefono} onChange={e=>setFormPedido(f=>({...f,telefono:e.target.value}))} placeholder="Teléfono (opcional)" style={{marginBottom:8}}/>
+                  <TA value={formPedido.items} onChange={e=>setFormPedido(f=>({...f,items:e.target.value}))} placeholder={"Items (uno por línea o separados por coma)\n2 lechuga\n1 tomate cherry $2500\n1 huevos"} style={{marginBottom:8,minHeight:90}}/>
+                  <div style={{fontSize:10,color:"var(--muted)",marginTop:-4,marginBottom:10}}>Formato: "cantidad nombre $precio" — el precio se toma del catálogo si no lo pones</div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+                    <div><Lbl>Fecha entrega</Lbl><Input type="date" value={formPedido.entrega} onChange={e=>setFormPedido(f=>({...f,entrega:e.target.value}))}/></div>
+                    <div><Lbl>Pago</Lbl>
+                      <select value={formPedido.pago} onChange={e=>setFormPedido(f=>({...f,pago:e.target.value}))} style={{width:"100%",background:"rgba(255,255,255,0.05)",border:"1px solid var(--border)",borderRadius:8,padding:10,color:"#fff",fontSize:14}}>
+                        <option value="pendiente">Pendiente</option>
+                        <option value="señado">Señado</option>
+                        <option value="pagado">Pagado</option>
+                      </select>
+                    </div>
+                  </div>
+                  <TA value={formPedido.nota} onChange={e=>setFormPedido(f=>({...f,nota:e.target.value}))} placeholder="Nota (opcional)" style={{marginBottom:10,minHeight:50}}/>
+                  <Btn onClick={addPedidoManual} disabled={!formPedido.cliente||!formPedido.items}>💾 Guardar pedido</Btn>
+                </Card>
+              )}
+
+              {pedidoMode==="lista"&&(
+                <>
+                  <div style={{display:"flex",gap:4,marginBottom:12,overflowX:"auto",paddingBottom:4}}>
+                    {["todos","nuevo","preparando","listo","entregado","cancelado"].map(e=>(
+                      <Pill key={e} active={filterEstado===e} onClick={()=>setFilterEstado(e)}>{e==="todos"?"Todos":e}</Pill>
+                    ))}
+                  </div>
+                  {pedidosFiltrados.length===0?(
+                    <Card style={{textAlign:"center",padding:30}}>
+                      <div style={{fontSize:40,marginBottom:10,opacity:0.5}}>📭</div>
+                      <div style={{fontSize:13,color:"var(--muted)"}}>No hay pedidos {filterEstado!=="todos"?`en estado "${filterEstado}"`:"todavía"}</div>
+                    </Card>
+                  ):pedidosFiltrados.map(p=>(
+                    <Card key={p.id} style={{marginBottom:10}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"start",marginBottom:8}}>
+                        <div style={{flex:1}}>
+                          <div style={{fontWeight:700,fontSize:14}}>{p.cliente} {p.fuente==="whatsapp"&&<span title="Desde WhatsApp" style={{fontSize:11}}>💬</span>}</div>
+                          {p.telefono&&<div style={{fontSize:11,color:"var(--muted)"}}>📞 <a href={`tel:${p.telefono}`} style={{color:"var(--muted)"}}>{p.telefono}</a> · <a href={`https://wa.me/${p.telefono.replace(/\D/g,"")}`} target="_blank" rel="noreferrer" style={{color:"var(--green-l)"}}>WhatsApp</a></div>}
+                        </div>
+                        <span style={{fontSize:10,padding:"3px 8px",borderRadius:10,background:p.estado==="entregado"?"rgba(76,175,80,0.2)":p.estado==="listo"?"rgba(0,201,167,0.2)":p.estado==="preparando"?"rgba(249,168,37,0.2)":p.estado==="cancelado"?"rgba(239,83,80,0.2)":"rgba(255,255,255,0.1)",color:p.estado==="entregado"?"var(--green-l)":p.estado==="listo"?"var(--mint)":p.estado==="preparando"?"var(--yellow)":p.estado==="cancelado"?"var(--red)":"#fff",fontFamily:"'Courier New',monospace",letterSpacing:1,textTransform:"uppercase"}}>{p.estado}</span>
+                      </div>
+                      <div style={{background:"rgba(0,0,0,0.2)",borderRadius:8,padding:8,marginBottom:8,fontSize:12,lineHeight:1.6}}>
+                        {p.items?.map((it,i)=><div key={i}>• {it.cantidad} {it.unidad} {it.nombre} {it.precio>0&&`— ${fmtMoney(it.cantidad*it.precio)}`}</div>)}
+                        <div style={{marginTop:6,paddingTop:6,borderTop:"1px dashed rgba(255,255,255,0.08)",fontWeight:700}}>Total: {fmtMoney(p.total)}</div>
+                      </div>
+                      <div style={{display:"flex",gap:10,fontSize:11,color:"var(--muted)",marginBottom:8,flexWrap:"wrap"}}>
+                        <span>📅 {fmtDate(p.entrega)}</span>
+                        <span>💳 {p.pago}</span>
+                      </div>
+                      {p.nota&&<div style={{fontSize:11,color:"var(--muted)",fontStyle:"italic",marginBottom:8,padding:"4px 8px",background:"rgba(255,255,255,0.03)",borderRadius:6}}>“{p.nota}”</div>}
+                      <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                        <select value={p.estado} onChange={e=>cambiarEstado(p.id,e.target.value)} style={{background:"rgba(255,255,255,0.05)",border:"1px solid var(--border)",borderRadius:6,padding:"4px 8px",color:"#fff",fontSize:11,fontFamily:"inherit",cursor:"pointer"}}>
+                          <option value="nuevo">nuevo</option>
+                          <option value="preparando">preparando</option>
+                          <option value="listo">listo</option>
+                          <option value="entregado">entregado</option>
+                          <option value="cancelado">cancelado</option>
+                        </select>
+                        <button onClick={()=>copiarWspPedido(p)} style={{background:"rgba(0,201,167,0.15)",border:"1px solid rgba(0,201,167,0.4)",color:"var(--mint)",borderRadius:6,padding:"4px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>📋 Copiar mensaje</button>
+                        <button onClick={()=>eliminarPedido(p.id)} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--red)",borderRadius:6,padding:"4px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit",marginLeft:"auto"}}>🗑</button>
+                      </div>
+                    </Card>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ========= CHATS ========= */}
+          {view==="chatTec"&&<ChatView tipo="tec"/>}
+          {view==="chatGen"&&<ChatView tipo="gen"/>}
+
+          {/* ========= PRODUCTOS ========= */}
+          {view==="productos"&&(
+            <div className="fade">
+              <div style={{display:"flex",gap:6,marginBottom:12}}>
+                <Pill active={prodMode==="lista"} onClick={()=>setProdMode("lista")}>📋 Catálogo ({productos.length})</Pill>
+                <Pill active={prodMode==="form"} onClick={()=>{setProdMode("form");setProdEdit(null);setProdForm({nombre:"",precio:"",unidad:"",categoria:"Verduras",stock:""});}}>➕ Nuevo</Pill>
+              </div>
+              {prodMode==="form"?(
+                <Card>
+                  <Lbl>{prodEdit?"Editar producto":"Nuevo producto"}</Lbl>
+                  <Input value={prodForm.nombre} onChange={e=>setProdForm(f=>({...f,nombre:e.target.value}))} placeholder="Nombre" style={{marginBottom:8}}/>
+                  <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:8,marginBottom:8}}>
+                    <Input type="number" value={prodForm.precio} onChange={e=>setProdForm(f=>({...f,precio:e.target.value}))} placeholder="Precio"/>
+                    <Input value={prodForm.unidad} onChange={e=>setProdForm(f=>({...f,unidad:e.target.value}))} placeholder="Unidad"/>
+                  </div>
+                  <Lbl>Categoría</Lbl>
+                  <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:10}}>
+                    {categorias.map(c=><Pill key={c} active={prodForm.categoria===c} onClick={()=>setProdForm(f=>({...f,categoria:c}))}>{c}</Pill>)}
+                  </div>
+                  <Lbl>Stock</Lbl>
+                  <Input type="number" value={prodForm.stock} onChange={e=>setProdForm(f=>({...f,stock:e.target.value}))} placeholder="Unidades disponibles" style={{marginBottom:10}}/>
+                  <Btn onClick={saveProducto} disabled={!prodForm.nombre||!prodForm.precio}>💾 {prodEdit?"Actualizar":"Guardar"}</Btn>
+                </Card>
+              ):(
+                <>
+                  {categorias.map(cat=>{
+                    const ps=productos.filter(p=>p.categoria===cat);
+                    if(!ps.length)return null;
+                    return (
+                      <div key={cat} style={{marginBottom:14}}>
+                        <Lbl style={{marginLeft:4}}>{cat} ({ps.length})</Lbl>
+                        {ps.map(p=>(
+                          <Card key={p.id} style={{marginBottom:6,padding:12,display:"flex",alignItems:"center",gap:10}}>
+                            <div style={{flex:1}}>
+                              <div style={{fontWeight:600,fontSize:13}}>{p.nombre}</div>
+                              <div style={{fontSize:11,color:"var(--muted)"}}>{fmtMoney(p.precio)} / {p.unidad} · Stock: {p.stock||0}</div>
+                            </div>
+                            <button onClick={()=>editProducto(p)} style={{background:"rgba(255,255,255,0.06)",border:"1px solid var(--border)",color:"#fff",borderRadius:6,padding:"6px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>✏️</button>
+                            <button onClick={()=>deleteProducto(p.id)} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--red)",borderRadius:6,padding:"6px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>🗑</button>
+                          </Card>
+                        ))}
+                      </div>
+                    );
+                  })}
+                  {productos.length===0&&(
+                    <Card style={{textAlign:"center",padding:30}}>
+                      <div style={{fontSize:40,marginBottom:10,opacity:0.5}}>🌱</div>
+                      <div style={{fontSize:13,color:"var(--muted)"}}>Cargá tus productos para empezar</div>
+                    </Card>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ========= CLIENTES ========= */}
+          {view==="clientes"&&(
+            <div className="fade">
+              <div style={{display:"flex",gap:6,marginBottom:12}}>
+                <Pill active={cliMode==="lista"} onClick={()=>setCliMode("lista")}>👥 Contactos ({clientes.length})</Pill>
+                <Pill active={cliMode==="form"} onClick={()=>{setCliMode("form");setCliEdit(null);setCliForm({nombre:"",telefono:"",nota:""});}}>➕ Nuevo</Pill>
+              </div>
+              {cliMode==="form"?(
+                <Card>
+                  <Lbl>{cliEdit?"Editar":"Nuevo"} cliente</Lbl>
+                  <Input value={cliForm.nombre} onChange={e=>setCliForm(f=>({...f,nombre:e.target.value}))} placeholder="Nombre" style={{marginBottom:8}}/>
+                  <Input value={cliForm.telefono} onChange={e=>setCliForm(f=>({...f,telefono:e.target.value}))} placeholder="Teléfono" style={{marginBottom:8}}/>
+                  <TA value={cliForm.nota} onChange={e=>setCliForm(f=>({...f,nota:e.target.value}))} placeholder="Notas (prefiere entregas los sábados, vegetariano, etc.)" style={{marginBottom:10}}/>
+                  <Btn onClick={saveCliente} disabled={!cliForm.nombre}>💾 Guardar</Btn>
+                </Card>
+              ):clientes.length===0?(
+                <Card style={{textAlign:"center",padding:30}}>
+                  <div style={{fontSize:40,marginBottom:10,opacity:0.5}}>👥</div>
+                  <div style={{fontSize:13,color:"var(--muted)"}}>Los clientes se agregan solos desde los pedidos, o cargalos manualmente</div>
+                </Card>
+              ):(
+                [...clientes].sort((a,b)=>(b.pedidos||0)-(a.pedidos||0)).map(c=>(
+                  <Card key={c.id} style={{marginBottom:8,padding:12}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"start",marginBottom:4}}>
+                      <div style={{fontWeight:600,fontSize:14}}>{c.nombre}</div>
+                      {c.pedidos>0&&<span style={{fontSize:10,background:"rgba(76,175,80,0.15)",color:"var(--green-l)",padding:"2px 8px",borderRadius:10,fontFamily:"'Courier New',monospace"}}>{c.pedidos} PEDIDOS</span>}
+                    </div>
+                    {c.telefono&&<div style={{fontSize:12,color:"var(--muted)",marginBottom:4}}>📞 <a href={`tel:${c.telefono}`} style={{color:"var(--muted)"}}>{c.telefono}</a> · <a href={`https://wa.me/${c.telefono.replace(/\D/g,"")}`} target="_blank" rel="noreferrer" style={{color:"var(--green-l)"}}>WhatsApp</a></div>}
+                    {c.nota&&<div style={{fontSize:11,color:"var(--muted)",fontStyle:"italic",marginTop:4}}>{c.nota}</div>}
+                    <div style={{display:"flex",gap:6,marginTop:8}}>
+                      <button onClick={()=>editCliente(c)} style={{background:"rgba(255,255,255,0.06)",border:"1px solid var(--border)",color:"#fff",borderRadius:6,padding:"4px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>✏️ Editar</button>
+                      <button onClick={()=>deleteCliente(c.id)} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--red)",borderRadius:6,padding:"4px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>🗑</button>
+                    </div>
+                  </Card>
+                ))
+              )}
+            </div>
+          )}
+
+          {/* ========= CALENDARIO ========= */}
+          {view==="calendario"&&(
+            <div className="fade">
+              <div style={{display:"flex",gap:6,marginBottom:12}}>
+                <Pill active={evMode==="lista"} onClick={()=>setEvMode("lista")}>📅 Vista</Pill>
+                <Pill active={evMode==="form"} onClick={()=>setEvMode("form")}>➕ Nuevo</Pill>
+              </div>
+              {evMode==="form"?(
+                <Card>
+                  <Lbl>Nuevo evento</Lbl>
+                  <Input value={evForm.titulo} onChange={e=>setEvForm(f=>({...f,titulo:e.target.value}))} placeholder="Título" style={{marginBottom:8}}/>
+                  <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:8,marginBottom:8}}>
+                    <Input type="date" value={evForm.fecha} onChange={e=>setEvForm(f=>({...f,fecha:e.target.value}))}/>
+                    <Input type="time" value={evForm.hora} onChange={e=>setEvForm(f=>({...f,hora:e.target.value}))}/>
+                  </div>
+                  <Lbl>Tipo</Lbl>
+                  <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:10}}>
+                    {Object.entries(EV_TIPOS).map(([k,v])=><Pill key={k} active={evForm.tipo===k} onClick={()=>setEvForm(f=>({...f,tipo:k}))} color={v.color}>{v.icon} {v.label}</Pill>)}
+                  </div>
+                  <TA value={evForm.nota} onChange={e=>setEvForm(f=>({...f,nota:e.target.value}))} placeholder="Nota" style={{marginBottom:10,minHeight:60}}/>
+                  <Btn onClick={saveEvento} disabled={!evForm.titulo}>💾 Guardar</Btn>
+                </Card>
+              ):(
+                <>
+                  {/* Calendario mensual simple */}
+                  <Card style={{marginBottom:14}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                      <button onClick={()=>setCalMes(d=>new Date(d.getFullYear(),d.getMonth()-1,1))} style={{background:"rgba(255,255,255,0.06)",border:"1px solid var(--border)",color:"#fff",borderRadius:8,padding:"6px 12px",cursor:"pointer"}}>◀</button>
+                      <div style={{fontWeight:700,textTransform:"capitalize"}}>{mesNombre}</div>
+                      <button onClick={()=>setCalMes(d=>new Date(d.getFullYear(),d.getMonth()+1,1))} style={{background:"rgba(255,255,255,0.06)",border:"1px solid var(--border)",color:"#fff",borderRadius:8,padding:"6px 12px",cursor:"pointer"}}>▶</button>
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3,fontSize:9,color:"var(--muted)",textAlign:"center",marginBottom:6,fontFamily:"'Courier New',monospace"}}>
+                      {["L","M","X","J","V","S","D"].map(d=><div key={d}>{d}</div>)}
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3}}>
+                      {diasDelMes.map((d,i)=>(
+                        <div key={i} style={{aspectRatio:"1",background:d?"rgba(255,255,255,0.03)":"transparent",borderRadius:6,padding:3,fontSize:10,position:"relative",border:d?.isToday?"1px solid var(--green)":"1px solid transparent",overflow:"hidden"}}>
+                          {d&&<>
+                            <div style={{color:d.isToday?"var(--green-l)":"#fff",fontWeight:d.isToday?700:400}}>{d.dia}</div>
+                            <div style={{display:"flex",gap:2,flexWrap:"wrap",marginTop:2}}>
+                              {d.evs.slice(0,3).map(e=><div key={e.id} title={e.titulo} style={{width:5,height:5,borderRadius:"50%",background:EV_TIPOS[e.tipo]?.color||"#fff"}}/>)}
+                            </div>
+                          </>}
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+
+                  <Lbl style={{marginLeft:4}}>Hoy ({evsHoy.length})</Lbl>
+                  {evsHoy.length===0?(
+                    <Card style={{marginBottom:14,padding:20,textAlign:"center",fontSize:12,color:"var(--muted)"}}>Sin eventos hoy</Card>
+                  ):evsHoy.map(e=>(
+                    <Card key={e.id} style={{marginBottom:6,padding:10,display:"flex",alignItems:"center",gap:10,borderLeft:`3px solid ${EV_TIPOS[e.tipo]?.color||"#4CAF50"}`}}>
+                      <div style={{fontSize:18}}>{EV_TIPOS[e.tipo]?.icon||"📌"}</div>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontWeight:600,fontSize:13}}>{e.titulo}</div>
+                        <div style={{fontSize:11,color:"var(--muted)"}}>⏰ {e.hora} · {EV_TIPOS[e.tipo]?.label}</div>
+                      </div>
+                      <button onClick={()=>deleteEvento(e.id)} style={{background:"transparent",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13}}>🗑</button>
+                    </Card>
+                  ))}
+
+                  <Lbl style={{marginLeft:4,marginTop:14}}>Próximos</Lbl>
+                  {evsProximos.length===0?(
+                    <Card style={{padding:20,textAlign:"center",fontSize:12,color:"var(--muted)"}}>Nada planificado</Card>
+                  ):evsProximos.map(e=>(
+                    <Card key={e.id} style={{marginBottom:6,padding:10,display:"flex",alignItems:"center",gap:10,borderLeft:`3px solid ${EV_TIPOS[e.tipo]?.color||"#4CAF50"}`}}>
+                      <div style={{fontSize:18}}>{EV_TIPOS[e.tipo]?.icon||"📌"}</div>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontWeight:600,fontSize:13}}>{e.titulo}</div>
+                        <div style={{fontSize:11,color:"var(--muted)"}}>{fmtDate(e.fecha)} · {e.hora}</div>
+                      </div>
+                      <button onClick={()=>deleteEvento(e.id)} style={{background:"transparent",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13}}>🗑</button>
+                    </Card>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ========= COSECHAS ========= */}
+          {view==="cosechas"&&(
+            <div className="fade">
+              <Card style={{marginBottom:14}}>
+                <Lbl>Registrar cosecha</Lbl>
+                <Input value={cosForm.producto} onChange={e=>setCosForm(f=>({...f,producto:e.target.value}))} placeholder="Producto (ej: tomate cherry)" style={{marginBottom:8}}/>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 2fr",gap:8,marginBottom:8}}>
+                  <Input type="number" step="0.1" value={cosForm.cantidad} onChange={e=>setCosForm(f=>({...f,cantidad:e.target.value}))} placeholder="Cantidad"/>
+                  <select value={cosForm.unidad} onChange={e=>setCosForm(f=>({...f,unidad:e.target.value}))} style={{background:"rgba(255,255,255,0.05)",border:"1px solid var(--border)",borderRadius:8,padding:10,color:"#fff"}}>
+                    <option value="kg">kg</option><option value="g">g</option><option value="u">unidades</option><option value="atado">atados</option><option value="planta">plantas</option><option value="doc">docena</option>
+                  </select>
+                  <Input type="date" value={cosForm.fecha} onChange={e=>setCosForm(f=>({...f,fecha:e.target.value}))}/>
+                </div>
+                <TA value={cosForm.nota} onChange={e=>setCosForm(f=>({...f,nota:e.target.value}))} placeholder="Notas (calidad, destino, etc.)" style={{marginBottom:10,minHeight:50}}/>
+                <Btn onClick={addCosecha} disabled={!cosForm.producto||!cosForm.cantidad}>🥬 Registrar</Btn>
+              </Card>
+
+              <Lbl style={{marginLeft:4}}>Últimas cosechas ({cosechas.length})</Lbl>
+              {cosechas.length===0?(
+                <Card style={{textAlign:"center",padding:30}}>
+                  <div style={{fontSize:40,marginBottom:10,opacity:0.5}}>🥬</div>
+                  <div style={{fontSize:13,color:"var(--muted)"}}>Empezá a registrar lo que cosechás</div>
+                </Card>
+              ):cosechas.slice(0,30).map(c=>(
+                <Card key={c.id} style={{marginBottom:6,padding:10,display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{fontSize:20}}>🥬</div>
+                  <div style={{flex:1}}>
+                    <div style={{fontWeight:600,fontSize:13}}>{c.producto}</div>
+                    <div style={{fontSize:11,color:"var(--muted)"}}>{c.cantidad} {c.unidad} · {fmtDate(c.fecha)}</div>
+                    {c.nota&&<div style={{fontSize:10,color:"var(--muted)",fontStyle:"italic",marginTop:2}}>{c.nota}</div>}
+                  </div>
+                  <button onClick={()=>deleteCosecha(c.id)} style={{background:"transparent",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13}}>🗑</button>
+                </Card>
+              ))}
+            </div>
+          )}
+
+          {/* ========= RECETAS ========= */}
+          {view==="recetas"&&(
+            <div className="fade">
+              <Card style={{marginBottom:14}}>
+                <Lbl>✨ Generar receta con IA</Lbl>
+                <Input value={recGenIngr} onChange={e=>setRecGenIngr(e.target.value)} placeholder="Ingredientes disponibles (ej: zapallitos, albahaca, cebolla)" style={{marginBottom:8}}/>
+                <Btn onClick={generarReceta} disabled={recGenBusy||!recGenIngr.trim()}>{recGenBusy?<><Spinner/> &nbsp;Creando receta...</>:"✨ Generar receta"}</Btn>
+              </Card>
+
+              <Card style={{marginBottom:14}}>
+                <Lbl>{recForm.nombre?"Editar":"Nueva"} receta</Lbl>
+                <Input value={recForm.nombre} onChange={e=>setRecForm(f=>({...f,nombre:e.target.value}))} placeholder="Nombre" style={{marginBottom:8}}/>
+                <TA value={recForm.ingredientes} onChange={e=>setRecForm(f=>({...f,ingredientes:e.target.value}))} placeholder="Ingredientes" style={{marginBottom:8,minHeight:80}}/>
+                <TA value={recForm.preparacion} onChange={e=>setRecForm(f=>({...f,preparacion:e.target.value}))} placeholder="Preparación" style={{marginBottom:8,minHeight:100}}/>
+                <Input value={recForm.temporada} onChange={e=>setRecForm(f=>({...f,temporada:e.target.value}))} placeholder="Temporada (ej: verano)" style={{marginBottom:10}}/>
+                <Btn onClick={saveReceta} disabled={!recForm.nombre||!recForm.ingredientes}>💾 Guardar receta</Btn>
+              </Card>
+
+              <Lbl style={{marginLeft:4}}>Recetario ({recetas.length})</Lbl>
+              {recetas.map(r=>(
+                <Card key={r.id} style={{marginBottom:8}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"start",marginBottom:6}}>
+                    <div>
+                      <div style={{fontWeight:700,fontSize:14}}>🥗 {r.nombre}</div>
+                      {r.temporada&&<div style={{fontSize:10,color:"var(--green-l)",fontFamily:"'Courier New',monospace",textTransform:"uppercase",letterSpacing:1}}>{r.temporada}</div>}
+                    </div>
+                    <button onClick={()=>deleteReceta(r.id)} style={{background:"transparent",border:"none",color:"var(--muted)",cursor:"pointer"}}>🗑</button>
+                  </div>
+                  <details>
+                    <summary style={{fontSize:12,color:"var(--green-l)",cursor:"pointer",padding:"4px 0"}}>Ver receta</summary>
+                    <div style={{fontSize:12,color:"var(--muted)",marginTop:8,lineHeight:1.6,whiteSpace:"pre-wrap"}}>
+                      <strong style={{color:"#fff"}}>Ingredientes:</strong>{"\n"}{r.ingredientes}{"\n\n"}
+                      <strong style={{color:"#fff"}}>Preparación:</strong>{"\n"}{r.preparacion}
+                    </div>
+                    <button onClick={()=>{navigator.clipboard?.writeText(`🥗 ${r.nombre}\n\nIngredientes:\n${r.ingredientes}\n\nPreparación:\n${r.preparacion}\n\n🌱 ${BRAND_NAME}`);alert("✅ Receta copiada");}} style={{marginTop:8,background:"rgba(0,201,167,0.15)",border:"1px solid var(--mint)",color:"var(--mint)",borderRadius:6,padding:"5px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>📋 Copiar para redes</button>
+                  </details>
+                </Card>
+              ))}
+            </div>
+          )}
+
+          {/* ========= IDEAS ========= */}
+          {view==="ideas"&&(
+            <div className="fade">
+              <Card style={{marginBottom:14}}>
+                <Lbl>✨ Generar 5 ideas de contenido</Lbl>
+                <Input value={ideasTema} onChange={e=>setIdeasTema(e.target.value)} placeholder="Tema opcional (ej: primavera, talleres, compost)" style={{marginBottom:8}}/>
+                <Btn onClick={generarIdeas} disabled={ideasBusy}>{ideasBusy?<><Spinner/> &nbsp;Pensando ideas...</>:"✨ Generar ideas"}</Btn>
+              </Card>
+
+              <Lbl style={{marginLeft:4}}>Banco de ideas ({ideas.filter(i=>!i.usada).length} sin usar)</Lbl>
+              {ideas.length===0&&(
+                <Card style={{textAlign:"center",padding:30}}>
+                  <div style={{fontSize:40,marginBottom:10,opacity:0.5}}>💡</div>
+                  <div style={{fontSize:13,color:"var(--muted)"}}>Generá tu primer banco de ideas</div>
+                </Card>
+              )}
+              {ideas.map(i=>(
+                <Card key={i.id} style={{marginBottom:10,opacity:i.usada?0.5:1}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"start",marginBottom:6}}>
+                    <div style={{fontWeight:700,fontSize:14,flex:1}}>💡 {i.titulo}</div>
+                    <span style={{fontSize:9,background:"rgba(76,175,80,0.2)",color:"var(--green-l)",padding:"2px 6px",borderRadius:10,fontFamily:"'Courier New',monospace",textTransform:"uppercase",whiteSpace:"nowrap",marginLeft:6}}>{i.formato}</span>
+                  </div>
+                  <div style={{fontSize:13,color:"#eaf2ec",marginBottom:8,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{i.copy}</div>
+                  {i.llamadoAccion&&<div style={{fontSize:12,color:"var(--mint)",marginBottom:8,fontStyle:"italic",fontWeight:600}}>→ {i.llamadoAccion}</div>}
+                  {i.hashtags&&<div style={{fontSize:11,color:"var(--green-l)",marginBottom:10,fontFamily:"'Courier New',monospace",lineHeight:1.5}}>{i.hashtags}</div>}
+                  <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                    <button onClick={()=>{
+                      const full=`${i.titulo}\n\n${i.copy}${i.llamadoAccion?`\n\n${i.llamadoAccion}`:""}${i.hashtags?`\n\n${i.hashtags}`:""}`;
+                      navigator.clipboard?.writeText(full);
+                      alert("✅ Idea completa copiada");
+                    }} style={{background:"rgba(0,201,167,0.15)",border:"1px solid var(--mint)",color:"var(--mint)",borderRadius:6,padding:"5px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>📋 Copiar todo</button>
+                    <button onClick={()=>{navigator.clipboard?.writeText(i.copy);alert("✅ Sólo el copy");}} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--muted)",borderRadius:6,padding:"5px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>Sólo copy</button>
+                    <button onClick={()=>moverAHistorial(i)} style={{background:"rgba(76,175,80,0.15)",border:"1px solid var(--green)",color:"var(--green-l)",borderRadius:6,padding:"5px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>✓ Ya la usé</button>
+                    <button onClick={()=>marcarUsada(i.id,!i.usada)} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--muted)",borderRadius:6,padding:"5px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>{i.usada?"Reactivar":"Pausar"}</button>
+                    <button onClick={()=>deleteIdea(i.id)} style={{background:"transparent",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13,marginLeft:"auto"}}>🗑</button>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          )}
+
+          {/* ========= HISTORIAL ========= */}
+          {view==="historial"&&(
+            <div className="fade">
+              <div style={{display:"flex",gap:6,marginBottom:12}}>
+                <Pill active={histMode==="lista"} onClick={()=>setHistMode("lista")}>📚 Lista ({historial.length})</Pill>
+                <Pill active={histMode==="form"} onClick={()=>setHistMode("form")}>➕ Cargar</Pill>
+              </div>
+              {histMode==="form"?(
+                <Card>
+                  <Lbl>Cargar publicación ya hecha</Lbl>
+                  <Input value={histForm.titulo} onChange={e=>setHistForm(f=>({...f,titulo:e.target.value}))} placeholder="Título/tema" style={{marginBottom:8}}/>
+                  <Lbl>Formato</Lbl>
+                  <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:10}}>
+                    {["post","carrusel","reel","story","video"].map(f=><Pill key={f} active={histForm.formato===f} onClick={()=>setHistForm(p=>({...p,formato:f}))}>{f}</Pill>)}
+                  </div>
+                  <TA value={histForm.copy} onChange={e=>setHistForm(f=>({...f,copy:e.target.value}))} placeholder="Copy publicado" style={{marginBottom:8,minHeight:80}}/>
+                  <TA value={histForm.nota} onChange={e=>setHistForm(f=>({...f,nota:e.target.value}))} placeholder="Nota (resultados, interacción, etc.)" style={{marginBottom:10,minHeight:50}}/>
+                  <Btn onClick={addHistorial} disabled={!histForm.titulo}>💾 Guardar</Btn>
+                </Card>
+              ):historial.length===0?(
+                <Card style={{textAlign:"center",padding:30}}>
+                  <div style={{fontSize:40,marginBottom:10,opacity:0.5}}>📚</div>
+                  <div style={{fontSize:13,color:"var(--muted)"}}>Llevá registro de lo que ya publicaste</div>
+                </Card>
+              ):historial.map(h=>(
+                <Card key={h.id} style={{marginBottom:8}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"start",marginBottom:4}}>
+                    <div>
+                      <div style={{fontWeight:700,fontSize:13}}>📚 {h.titulo}</div>
+                      <div style={{fontSize:10,color:"var(--muted)",fontFamily:"'Courier New',monospace"}}>{h.formato?.toUpperCase()} · {fmtDate(h.fecha)}</div>
+                    </div>
+                    <button onClick={()=>deleteHist(h.id)} style={{background:"transparent",border:"none",color:"var(--muted)",cursor:"pointer"}}>🗑</button>
+                  </div>
+                  {h.copy&&<div style={{fontSize:11,color:"var(--muted)",marginTop:4,fontStyle:"italic"}}>{h.copy.length>120?h.copy.slice(0,120)+"…":h.copy}</div>}
+                  {h.nota&&<div style={{fontSize:10,color:"var(--green-l)",marginTop:4,padding:"4px 8px",background:"rgba(76,175,80,0.08)",borderRadius:6}}>📊 {h.nota}</div>}
+                </Card>
+              ))}
+            </div>
+          )}
+
+          {/* ========= STATS ========= */}
+          {view==="stats"&&(
+            <div className="fade">
+              <Card style={{marginBottom:14,padding:16,background:"linear-gradient(135deg,rgba(76,175,80,0.15),rgba(0,201,167,0.08))"}}>
+                <Lbl style={{color:"var(--green-l)"}}>Este mes</Lbl>
+                <div style={{fontSize:28,fontWeight:800,marginBottom:4}}>{fmtMoney(stats.totalMes)}</div>
+                <div style={{fontSize:11,color:"var(--muted)"}}>en {stats.pedMes} pedidos · {stats.entregados} entregados</div>
+              </Card>
+
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:14}}>
+                <Card style={{padding:12}}>
+                  <div style={{fontSize:22,fontWeight:700}}>{stats.pedSem}</div>
+                  <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",fontFamily:"'Courier New',monospace",letterSpacing:1}}>Pedidos semana</div>
+                </Card>
+                <Card style={{padding:12}}>
+                  <div style={{fontSize:22,fontWeight:700}}>{stats.pendientes}</div>
+                  <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",fontFamily:"'Courier New',monospace",letterSpacing:1}}>Pendientes</div>
+                </Card>
+                <Card style={{padding:12}}>
+                  <div style={{fontSize:22,fontWeight:700}}>{stats.cosMes}</div>
+                  <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",fontFamily:"'Courier New',monospace",letterSpacing:1}}>Cosechas mes</div>
+                </Card>
+                <Card style={{padding:12}}>
+                  <div style={{fontSize:22,fontWeight:700}}>{clientes.length}</div>
+                  <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",fontFamily:"'Courier New',monospace",letterSpacing:1}}>Clientes</div>
+                </Card>
+              </div>
+
+              {stats.top.length>0&&(
+                <Card style={{marginBottom:14}}>
+                  <Lbl>🏆 Productos más pedidos del mes</Lbl>
+                  {stats.top.map(([n,c],i)=>(
+                    <div key={n} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,fontSize:13}}>
+                      <div style={{width:24,height:24,background:"rgba(76,175,80,0.2)",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:"var(--green-l)"}}>{i+1}</div>
+                      <div style={{flex:1}}>{n}</div>
+                      <div style={{fontSize:11,color:"var(--muted)",fontFamily:"'Courier New',monospace"}}>{c} u</div>
+                    </div>
+                  ))}
+                </Card>
+              )}
+
+              {stats.topCli.length>0&&(
+                <Card style={{marginBottom:14}}>
+                  <Lbl>👑 Clientes más activos del mes</Lbl>
+                  {stats.topCli.map(([n,c],i)=>(
+                    <div key={n} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,fontSize:13}}>
+                      <div style={{width:24,height:24,background:"rgba(0,201,167,0.2)",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:"var(--mint)"}}>{i+1}</div>
+                      <div style={{flex:1}}>{n}</div>
+                      <div style={{fontSize:11,color:"var(--muted)",fontFamily:"'Courier New',monospace"}}>{c} ped</div>
+                    </div>
+                  ))}
+                </Card>
+              )}
+
+              <Card style={{padding:14}}>
+                <Lbl>📊 Contenido</Lbl>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,textAlign:"center"}}>
+                  <div><div style={{fontSize:18,fontWeight:700}}>{stats.ideasMes}</div><div style={{fontSize:10,color:"var(--muted)"}}>Ideas</div></div>
+                  <div><div style={{fontSize:18,fontWeight:700}}>{stats.histMes}</div><div style={{fontSize:10,color:"var(--muted)"}}>Publicado</div></div>
+                  <div><div style={{fontSize:18,fontWeight:700}}>{stats.eventosMes}</div><div style={{fontSize:10,color:"var(--muted)"}}>Eventos</div></div>
+                </div>
+              </Card>
+            </div>
+          )}
+
+        </main>
+      )}
+
+      <footer style={{textAlign:"center",padding:"14px",fontSize:10,color:"rgba(234,242,236,0.3)",fontFamily:"'Courier New',monospace",letterSpacing:2,borderTop:"1px solid var(--border)"}}>
+        HUERTA SXXI · ASISTENTE · v1.0
+      </footer>
+    </div>
+  );
+}
+
+ReactDOM.render(React.createElement(App),document.getElementById("root"));
+</script>
+<script>
+  if("serviceWorker" in navigator){
+    window.addEventListener("load",()=>{
+      navigator.serviceWorker.register("sw-asistente.js").catch(()=>{});
+    });
+  }
+</script>
+</body>
+</html>
