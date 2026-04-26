@@ -47,8 +47,21 @@
 const {useState,useRef,useEffect,useMemo}=React;
 
 // ============ CONSTANTES ============
-const GEMINI_KEY="AIzaSyDkO8xlXS9U0AWO5CUWSgmcwz24GEBaj4A";
 const BRAND_NAME="Huerta Agroecológica Siglo XXI";
+
+// ============ API KEY MANAGEMENT ============
+// La key NO se hardcodea. La app la pide al usuario y la guarda en localStorage.
+const API_KEY_STORAGE="hs_gemini_key";
+const getApiKey=()=>{try{return localStorage.getItem(API_KEY_STORAGE)||"";}catch{return "";}};
+const setApiKey=k=>{try{localStorage.setItem(API_KEY_STORAGE,k);}catch{}};
+const clearApiKey=()=>{try{localStorage.removeItem(API_KEY_STORAGE);}catch{}};
+
+// Listener global para errores de API key
+let __apiKeyListeners=[];
+const onApiKeyMissing=cb=>{__apiKeyListeners.push(cb);};
+const flagApiKeyMissing=msg=>{
+  __apiKeyListeners.forEach(cb=>cb(msg||"Falta configurar la API key"));
+};
 
 const MODULES=[
   {id:"pedidos",label:"Pedidos",icon:"📋",desc:"Carga manual + IA desde WhatsApp"},
@@ -72,6 +85,11 @@ const store={
 
 // ============ GEMINI ============
 const geminiCall=async(prompt,system)=>{
+  const key=getApiKey();
+  if(!key){
+    flagApiKeyMissing("Falta configurar la API key de Gemini");
+    return "⚠️ Falta configurar la API key. Tocá el ícono ⚙ arriba a la derecha para hacerlo.";
+  }
   try{
     const body={
       contents:[{parts:[{text:prompt}]}],
@@ -82,21 +100,23 @@ const geminiCall=async(prompt,system)=>{
       }
     };
     if(system)body.systemInstruction={parts:[{text:system}]};
-    const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
+    const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`,
       {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     if(!res.ok){
       const errTxt=await res.text();
       console.error("Gemini HTTP",res.status,errTxt);
+      if(res.status===403||res.status===401||res.status===400){
+        flagApiKeyMissing(`Tu API key parece estar bloqueada o ser inválida (error ${res.status}). Generá una nueva en aistudio.google.com/app/apikey y volvé a guardarla.`);
+        return `⚠️ Tu API key fue bloqueada o es inválida. Tocá el ⚙ arriba para configurar una nueva.`;
+      }
       return `⚠️ Error ${res.status}: ${errTxt.slice(0,200)}`;
     }
     const data=await res.json();
-    // Si bloquea por seguridad, lo informamos
     if(data.promptFeedback?.blockReason){
       return `⚠️ El pedido fue bloqueado: ${data.promptFeedback.blockReason}`;
     }
     const cand=data.candidates?.[0];
     if(!cand)return "⚠️ La IA no devolvió respuesta. Probá reformulando la pregunta.";
-    // Combinar TODOS los parts que tengan texto (Gemini 2.5 puede devolver varios bloques)
     const parts=cand.content?.parts||[];
     const text=parts.map(p=>p.text||"").filter(Boolean).join("\n").trim();
     if(!text){
@@ -246,6 +266,45 @@ const Markdown=({text})=>{
 // ============ APP ============
 function App(){
   const [view,setView]=useState("home");
+
+  // API Key
+  const [apiKeyModal,setApiKeyModal]=useState(false);
+  const [apiKeyDraft,setApiKeyDraft]=useState("");
+  const [apiKeyMessage,setApiKeyMessage]=useState("");
+  const [hasApiKey,setHasApiKey]=useState(()=>!!getApiKey());
+
+  useEffect(()=>{
+    const handler=msg=>{
+      setApiKeyMessage(msg);
+      setApiKeyDraft(getApiKey());
+      setApiKeyModal(true);
+      setHasApiKey(false);
+    };
+    onApiKeyMissing(handler);
+  },[]);
+
+  const saveApiKeyDraft=()=>{
+    const k=apiKeyDraft.trim();
+    if(!k)return;
+    setApiKey(k);
+    setHasApiKey(true);
+    setApiKeyModal(false);
+    setApiKeyMessage("");
+  };
+  const clearStoredKey=()=>{
+    if(!confirm("¿Borrar la API key guardada en este dispositivo?"))return;
+    clearApiKey();
+    setApiKeyDraft("");
+    setHasApiKey(false);
+  };
+
+  // Si al cargar la app no hay API key, mostrar modal con bienvenida
+  useEffect(()=>{
+    if(!hasApiKey){
+      setApiKeyMessage("");
+      // No abrir automáticamente; el usuario abre cuando quiera
+    }
+  },[]);
 
   // ========= DATOS PERSISTENTES =========
   const [pedidos,setPedidos]=useState(()=>store.get("pedidos",[]));
@@ -651,10 +710,11 @@ Respondé SÓLO JSON sin markdown ni explicaciones: {"ideas":[{"titulo":"","form
             <div style={{fontSize:10,color:"var(--muted)",fontFamily:"'Courier New',monospace",letterSpacing:1}}>ASISTENTE</div>
           </div>
         </div>
-        <div style={{display:"flex",gap:6}}>
+        <div style={{display:"flex",gap:6,alignItems:"center"}}>
           {stats.pendientes>0&&(
             <button onClick={()=>setView("pedidos")} style={{background:"rgba(239,83,80,0.2)",border:"1px solid var(--red)",color:"var(--red)",borderRadius:8,padding:"6px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>📋 {stats.pendientes}</button>
           )}
+          <button onClick={()=>{setApiKeyDraft(getApiKey());setApiKeyMessage("");setApiKeyModal(true);}} title={hasApiKey?"API key configurada":"Configurar API key"} style={{background:hasApiKey?"rgba(76,175,80,0.15)":"rgba(249,168,37,0.2)",border:`1px solid ${hasApiKey?"var(--green)":"var(--yellow)"}`,color:hasApiKey?"var(--green-l)":"var(--yellow)",borderRadius:8,width:34,height:34,cursor:"pointer",fontSize:16,fontFamily:"inherit"}}>⚙</button>
           <input ref={importarRef} type="file" accept=".json" style={{display:"none"}} onChange={importarDatos}/>
         </div>
       </header>
@@ -1225,6 +1285,49 @@ Respondé SÓLO JSON sin markdown ni explicaciones: {"ideas":[{"titulo":"","form
       <footer style={{textAlign:"center",padding:"14px",fontSize:10,color:"rgba(234,242,236,0.3)",fontFamily:"'Courier New',monospace",letterSpacing:2,borderTop:"1px solid var(--border)"}}>
         HUERTA SXXI · ASISTENTE · v1.0
       </footer>
+
+      {/* MODAL API KEY */}
+      {apiKeyModal&&(
+        <div onClick={e=>{if(e.target===e.currentTarget)setApiKeyModal(false);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.85)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
+          <div style={{background:"#0f1d15",border:"1px solid var(--border)",borderRadius:16,padding:24,maxWidth:480,width:"100%",boxShadow:"0 20px 60px rgba(0,0,0,0.5)",fontFamily:"Georgia,serif"}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+              <div style={{fontSize:20,fontWeight:800}}>Configurar IA</div>
+              <button onClick={()=>setApiKeyModal(false)} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--muted)",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16}}>✕</button>
+            </div>
+            {apiKeyMessage&&(
+              <div style={{background:"rgba(249,168,37,0.12)",border:"1px solid var(--yellow)",color:"#FFD54F",borderRadius:8,padding:"10px 12px",fontSize:12,marginBottom:14,lineHeight:1.5}}>
+                ⚠ {apiKeyMessage}
+              </div>
+            )}
+            <div style={{fontSize:13,color:"var(--muted)",lineHeight:1.6,marginBottom:14,fontStyle:"italic"}}>
+              Para que la IA funcione (chats, pedidos por WhatsApp, recetas, ideas), necesitás una clave de Google Gemini. Es gratis. Se guarda <strong style={{color:"var(--green-l)"}}>sólo en este dispositivo</strong>, no se sube a ningún lado.
+            </div>
+            <div style={{background:"rgba(76,175,80,0.08)",border:"1px solid rgba(76,175,80,0.3)",borderRadius:8,padding:12,marginBottom:14,fontSize:12,lineHeight:1.7}}>
+              <div style={{color:"var(--green-l)",marginBottom:6,fontSize:10,fontFamily:"'Courier New',monospace",letterSpacing:1}}>CÓMO CONSEGUIR TU CLAVE</div>
+              <ol style={{paddingLeft:18,margin:0}}>
+                <li>Andá a <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener" style={{color:"var(--yellow)",textDecoration:"underline"}}>aistudio.google.com/app/apikey</a></li>
+                <li>Iniciá sesión con tu cuenta de Google</li>
+                <li>Tocá <strong>"Create API key"</strong> y copiá la clave</li>
+                <li>Pegala acá abajo y guardá</li>
+              </ol>
+            </div>
+            <div style={{fontSize:10,color:"var(--muted)",marginBottom:6,textTransform:"uppercase",letterSpacing:1.5,fontFamily:"'Courier New',monospace"}}>Tu clave de Gemini</div>
+            <input
+              value={apiKeyDraft}
+              onChange={e=>setApiKeyDraft(e.target.value)}
+              placeholder="AIzaSy..."
+              autoComplete="off"
+              spellCheck="false"
+              style={{width:"100%",background:"rgba(255,255,255,0.05)",border:"1px solid var(--border)",borderRadius:8,padding:12,color:"#fff",fontSize:13,fontFamily:"'Courier New',monospace",marginBottom:14,outline:"none"}}
+            />
+            <div style={{display:"grid",gridTemplateColumns:hasApiKey?"1fr 1fr":"1fr",gap:8}}>
+              <Btn onClick={saveApiKeyDraft} disabled={!apiKeyDraft.trim()}>Guardar clave</Btn>
+              {hasApiKey&&<Btn onClick={clearStoredKey} variant="ghost">Borrar guardada</Btn>}
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
