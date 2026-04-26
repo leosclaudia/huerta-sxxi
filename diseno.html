@@ -64,7 +64,12 @@
 const {useState,useRef,useCallback,useEffect}=React;
 
 // ============ CONSTANTES ============
-const GEMINI_KEY="AIzaSyDkO8xlXS9U0AWO5CUWSgmcwz24GEBaj4A";
+// ============ API KEY MANAGEMENT ============
+// La key NO se hardcodea. La app la pide al usuario y la guarda en localStorage.
+const API_KEY_STORAGE="hd_gemini_key";
+const getApiKey=()=>{try{return localStorage.getItem(API_KEY_STORAGE)||"";}catch{return "";}};
+const setApiKey=k=>{try{localStorage.setItem(API_KEY_STORAGE,k);}catch{}};
+const clearApiKey=()=>{try{localStorage.removeItem(API_KEY_STORAGE);}catch{}};
 const BRAND_NAME="Huerta Agroecológica Siglo XXI";
 const LOGO_SRC="icon-192.png";
 
@@ -178,7 +183,18 @@ const wrapText=(ctx,text,x,y,maxW,lineH)=>{
 };
 
 // ============ GEMINI ============
+// Estado global del estado de la API key (true = falta o falló)
+let __apiKeyMissing=false;
+const __apiKeyListeners=[];
+const onApiKeyMissing=cb=>{__apiKeyListeners.push(cb);};
+const flagApiKeyMissing=msg=>{
+  __apiKeyMissing=true;
+  __apiKeyListeners.forEach(cb=>cb(msg||"Falta configurar la API key"));
+};
+
 const geminiText=async prompt=>{
+  const key=getApiKey();
+  if(!key){flagApiKeyMissing("Falta configurar la API key de Gemini");return "";}
   try{
     const body={
       contents:[{parts:[{text:prompt}]}],
@@ -188,9 +204,16 @@ const geminiText=async prompt=>{
         thinkingConfig:{thinkingBudget:0}
       }
     };
-    const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
+    const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`,
       {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-    if(!res.ok){console.error("Gemini HTTP",res.status,await res.text());return "";}
+    if(!res.ok){
+      const txt=await res.text();
+      console.error("Gemini HTTP",res.status,txt);
+      if(res.status===403||res.status===401||res.status===400){
+        flagApiKeyMissing(`Tu API key parece estar bloqueada o ser inválida (error ${res.status}). Generá una nueva en aistudio.google.com/app/apikey y volvé a guardarla.`);
+      }
+      return "";
+    }
     const data=await res.json();
     const cand=data.candidates?.[0];
     if(!cand)return "";
@@ -205,6 +228,38 @@ function App(){
   const [img,setImg]=useState(null);
   const [imgFile,setImgFile]=useState(null);
   const fileRef=useRef();
+
+  // API Key
+  const [apiKeyModal,setApiKeyModal]=useState(false);
+  const [apiKeyDraft,setApiKeyDraft]=useState("");
+  const [apiKeyMessage,setApiKeyMessage]=useState("");
+  const [hasApiKey,setHasApiKey]=useState(()=>!!getApiKey());
+
+  // Suscribirse a errores de API key
+  useEffect(()=>{
+    const handler=msg=>{
+      setApiKeyMessage(msg);
+      setApiKeyDraft(getApiKey());
+      setApiKeyModal(true);
+      setHasApiKey(false);
+    };
+    onApiKeyMissing(handler);
+  },[]);
+
+  const saveApiKeyDraft=()=>{
+    const k=apiKeyDraft.trim();
+    if(!k)return;
+    setApiKey(k);
+    setHasApiKey(true);
+    setApiKeyModal(false);
+    setApiKeyMessage("");
+  };
+  const clearStoredKey=()=>{
+    if(!confirm("¿Borrar la API key guardada en este dispositivo?"))return;
+    clearApiKey();
+    setApiKeyDraft("");
+    setHasApiKey(false);
+  };
 
   // Editor
   const [filter,setFilter]=useState("none");
@@ -229,6 +284,8 @@ function App(){
   const [modelosText,setModelosText]=useState("");
   const [modelosTitulo,setModelosTitulo]=useState("");
   const [modelosSubtitulo,setModelosSubtitulo]=useState("");
+  const [modelosImgs,setModelosImgs]=useState([]); // URLs blob de imágenes adicionales (sin límite)
+  const modelosImgsRef=useRef();
 
   // Story
   const [storyTpl,setStoryTpl]=useState(STORY_TEMPLATES[0]);
@@ -401,98 +458,681 @@ function App(){
   };
 
   // 4 modelos
-  const buildModelo=async(style,im)=>{
+  // Dibuja una hojita simple en SVG path-style (forma de almendra con vena central)
+  const drawLeaf=(ctx,cx,cy,size,angle,color)=>{
+    ctx.save();
+    ctx.translate(cx,cy);
+    ctx.rotate(angle*Math.PI/180);
+    ctx.fillStyle=color;
+    ctx.beginPath();
+    ctx.moveTo(0,-size);
+    ctx.bezierCurveTo(size*0.6,-size*0.7,size*0.6,size*0.7,0,size);
+    ctx.bezierCurveTo(-size*0.6,size*0.7,-size*0.6,-size*0.7,0,-size);
+    ctx.closePath();
+    ctx.fill();
+    // vena central
+    ctx.strokeStyle="rgba(255,255,255,0.35)";
+    ctx.lineWidth=Math.max(1,size*0.05);
+    ctx.beginPath();
+    ctx.moveTo(0,-size*0.85);
+    ctx.lineTo(0,size*0.85);
+    ctx.stroke();
+    ctx.restore();
+  };
+
+  // Dibuja la imagen ENTERA (contain) centrada en un área dada, sin recortar
+  const drawImageContain=(ctx,img,x,y,w,h,bgColor)=>{
+    if(bgColor){ctx.fillStyle=bgColor;ctx.fillRect(x,y,w,h);}
+    const scale=Math.min(w/img.width,h/img.height);
+    const dw=img.width*scale,dh=img.height*scale;
+    const dx=x+(w-dw)/2,dy=y+(h-dh)/2;
+    ctx.drawImage(img,dx,dy,dw,dh);
+    return {dx,dy,dw,dh};
+  };
+
+  // Dibuja título con UNA palabra destacada en otro color (la última o la marcada con * en el texto)
+  // Si el texto tiene un asterisco *así* la palabra entre asteriscos va en color destacado
+  const drawHighlightTitle=(ctx,text,opts)=>{
+    const {x,y,maxW,fontFamily,fontWeight="bold",fontStyle="normal",initialSize,minSize=24,colorMain,colorAccent,align="center",baseline="middle",maxLines=3,lineHeightMul=1.1}=opts;
+    // Detectar palabra entre asteriscos
+    const m=text.match(/\*([^*]+)\*/);
+    let plainText,accentWord;
+    if(m){accentWord=m[1];plainText=text.replace(/\*/g,"");}
+    else{plainText=text;accentWord=null;}
+    // Usar drawSmartText pero pintando con tracking manual
+    let size=initialSize;
+    let lines=[];
+    while(size>=minSize){
+      ctx.font=`${fontStyle} ${fontWeight} ${size}px ${fontFamily}`;
+      lines=[];
+      const words=plainText.split(" ");
+      let cur="";
+      for(const w of words){
+        const test=cur?cur+" "+w:w;
+        if(ctx.measureText(test).width<=maxW)cur=test;
+        else{
+          if(cur)lines.push(cur);
+          cur=w;
+        }
+      }
+      if(cur)lines.push(cur);
+      if(lines.length<=maxLines)break;
+      size-=2;
+    }
+    const lineH=size*lineHeightMul;
+    const totalH=lineH*lines.length;
+    ctx.textAlign=align;ctx.textBaseline=baseline;
+    let startY=baseline==="middle"?y-totalH/2+lineH/2:y;
+    lines.forEach((line,li)=>{
+      const ly=startY+li*lineH;
+      if(accentWord&&line.includes(accentWord)){
+        // Pintar parte por parte para destacar la palabra
+        const parts=line.split(new RegExp(`(${accentWord.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`));
+        const widths=parts.map(p=>ctx.measureText(p).width);
+        const totalW=widths.reduce((a,b)=>a+b,0);
+        let cursorX=align==="center"?x-totalW/2:align==="right"?x-totalW:x;
+        ctx.textAlign="left";
+        parts.forEach((p,pi)=>{
+          ctx.fillStyle=p===accentWord?colorAccent:colorMain;
+          ctx.fillText(p,cursorX,ly);
+          cursorX+=widths[pi];
+        });
+        ctx.textAlign=align;
+      }else{
+        ctx.fillStyle=colorMain;
+        ctx.fillText(line,x,ly);
+      }
+    });
+    return {height:totalH,size,lines:lines.length};
+  };
+
+  // 4 modelos cálidos — imagen siempre completa, sin recortes raros
+  // Logo de la huerta (precargado del DOM si está disponible)
+  const getLogoImage=async()=>{
+    try{return await loadImage("icon-192.png");}catch{return null;}
+  };
+
+  // Dibuja un sello/badge circular con texto (ej: "100% NATURAL", "AGROECOLÓGICO")
+  const drawBadge=(ctx,cx,cy,radius,text,opts={})=>{
+    const {bgColor="#c8442f",textColor="#fffaf0",borderColor=null,rotation=-12,fontSize=null}=opts;
+    ctx.save();
+    ctx.translate(cx,cy);
+    ctx.rotate(rotation*Math.PI/180);
+    // Fondo del badge
+    ctx.fillStyle=bgColor;
+    ctx.beginPath();
+    ctx.arc(0,0,radius,0,Math.PI*2);
+    ctx.fill();
+    // Borde dentado opcional (efecto "stamp")
+    if(borderColor){
+      ctx.strokeStyle=borderColor;
+      ctx.lineWidth=2;
+      ctx.setLineDash([4,3]);
+      ctx.beginPath();
+      ctx.arc(0,0,radius-6,0,Math.PI*2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    // Texto centrado, en varias líneas si hace falta
+    ctx.fillStyle=textColor;
+    const lines=text.split("\n");
+    const fs=fontSize||Math.max(11,radius*0.28);
+    ctx.font=`bold ${fs}px 'Courier New',monospace`;
+    ctx.textAlign="center";ctx.textBaseline="middle";
+    const lineH=fs*1.15;
+    const startY=-(lines.length-1)*lineH/2;
+    lines.forEach((l,i)=>ctx.fillText(l,0,startY+i*lineH));
+    ctx.restore();
+  };
+
+  // Dibuja una "cinta" con texto (banderín diagonal)
+  const drawRibbon=(ctx,cx,cy,w,h,text,opts={})=>{
+    const {bgColor="#c8442f",textColor="#fffaf0",rotation=0,fontSize=null}=opts;
+    ctx.save();
+    ctx.translate(cx,cy);
+    ctx.rotate(rotation*Math.PI/180);
+    // Fondo del ribbon (rectángulo con triángulos a los lados)
+    ctx.fillStyle=bgColor;
+    ctx.beginPath();
+    ctx.moveTo(-w/2,-h/2);
+    ctx.lineTo(w/2,-h/2);
+    ctx.lineTo(w/2+h*0.4,0);
+    ctx.lineTo(w/2,h/2);
+    ctx.lineTo(-w/2,h/2);
+    ctx.lineTo(-w/2-h*0.4,0);
+    ctx.closePath();
+    ctx.fill();
+    // Texto
+    ctx.fillStyle=textColor;
+    const fs=fontSize||h*0.45;
+    ctx.font=`bold ${fs}px Georgia,serif`;
+    ctx.textAlign="center";ctx.textBaseline="middle";
+    ctx.fillText(text,0,2);
+    ctx.restore();
+  };
+
+  // Recibe un array de imágenes (1 a N) y devuelve UNA composición visual (combo/grid)
+  // dependiendo de la cantidad. Se dibuja dentro del rect (x,y,w,h) sin recortar.
+  const drawImagesCombo=(ctx,imgs,x,y,w,h,bgColor="#fffaf0")=>{
+    ctx.fillStyle=bgColor;ctx.fillRect(x,y,w,h);
+    const n=imgs.length;
+    if(n===1){
+      drawImageContain(ctx,imgs[0],x,y,w,h,bgColor);
+    }else if(n===2){
+      // Lado a lado vertical (50/50)
+      const gap=8;
+      const cellW=(w-gap)/2;
+      drawImageContain(ctx,imgs[0],x,y,cellW,h,bgColor);
+      drawImageContain(ctx,imgs[1],x+cellW+gap,y,cellW,h,bgColor);
+    }else if(n===3){
+      // 1 grande izquierda + 2 chicas apiladas derecha
+      const gap=8;
+      const bigW=(w-gap)*0.62;
+      const smW=w-bigW-gap;
+      const smH=(h-gap)/2;
+      drawImageContain(ctx,imgs[0],x,y,bigW,h,bgColor);
+      drawImageContain(ctx,imgs[1],x+bigW+gap,y,smW,smH,bgColor);
+      drawImageContain(ctx,imgs[2],x+bigW+gap,y+smH+gap,smW,smH,bgColor);
+    }else{
+      // 4 o más: grilla 2x2 con las primeras 4
+      const gap=8;
+      const cellW=(w-gap)/2;
+      const cellH=(h-gap)/2;
+      const slots=[
+        [x,y],[x+cellW+gap,y],
+        [x,y+cellH+gap],[x+cellW+gap,y+cellH+gap]
+      ];
+      slots.forEach((p,i)=>{
+        if(imgs[i])drawImageContain(ctx,imgs[i],p[0],p[1],cellW,cellH,bgColor);
+      });
+      // Si hay más de 4, indicador "+N"
+      if(n>4){
+        const last=slots[3];
+        ctx.fillStyle="rgba(61,40,23,0.85)";
+        ctx.fillRect(last[0],last[1],cellW,cellH);
+        ctx.fillStyle="#fffaf0";
+        ctx.font=`bold ${cellW*0.25}px Georgia,serif`;
+        ctx.textAlign="center";ctx.textBaseline="middle";
+        ctx.fillText(`+${n-3}`,last[0]+cellW/2,last[1]+cellH/2);
+      }
+    }
+  };
+
+  // Selecciona qué imágenes usar para un modelo dado
+  // Si style es "combo" devuelve todas, si no devuelve solo la primera (o varias para algunos casos)
+  const pickImagesFor=(style,allImgs)=>{
+    if(allImgs.length===0)return [];
+    // Modelos que SIEMPRE muestran todas las imágenes en combo
+    if(style==="catalogo"||style==="pack")return allImgs;
+    // Modelos que muestran 1 sola imagen: usar la primera
+    return [allImgs[0]];
+  };
+
+  const buildModelo=async(style,imgs,titleOverride,subOverride,badgeOverride)=>{
     const canvas=document.createElement("canvas");
     canvas.width=1080;canvas.height=1080;
     const ctx=canvas.getContext("2d");
-    const title=modelosTitulo||"Huerta SXXI";
-    const sub=modelosSubtitulo||BRAND_NAME;
+    const title=titleOverride||modelosTitulo||"Alma de Huerta";
+    const sub=subOverride||modelosSubtitulo||"Sabor artesanal";
+    const logo=await getLogoImage();
+    // Garantizar que imgs sea un array
+    if(!Array.isArray(imgs))imgs=[imgs];
+    const im=imgs[0];
+    const hasMultiple=imgs.length>1;
 
-    if(style==="minimal"){
-      // Imagen completa con franja inferior con título y subtítulo
-      drawImageCover(ctx,im,0,0,1080,1080);
-      ctx.fillStyle="rgba(10,10,10,0.85)";ctx.fillRect(0,760,1080,320);
-      const tRes=drawSmartText(ctx,title.toUpperCase(),{
-        x:540,y:855,maxW:980,fontFamily:"Georgia,serif",fontWeight:"bold",
-        initialSize:72,minSize:36,color:"#fff",align:"center",baseline:"middle",maxLines:2
+    // ===== ESTILO 1: CÁLIDO (referencia tipo "Alma de Huerta" con fondo crema y hojitas) =====
+    if(style==="calido"){
+      // Fondo crema con textura sutil
+      ctx.fillStyle="#f5ecd9";ctx.fillRect(0,0,1080,1080);
+      // Sombras suaves de hojas en el fondo (verde muy diluido)
+      ctx.globalAlpha=0.08;
+      drawLeaf(ctx,80,140,90,-30,"#4a7a2e");
+      drawLeaf(ctx,1000,80,75,40,"#79B553");
+      drawLeaf(ctx,60,950,80,20,"#79B553");
+      drawLeaf(ctx,1010,1000,95,-50,"#4a7a2e");
+      drawLeaf(ctx,200,60,55,15,"#79B553");
+      drawLeaf(ctx,950,500,60,90,"#4a7a2e");
+      ctx.globalAlpha=1;
+
+      // Imagen con fondo blanco redondeado para que destaque
+      const padImg=80;
+      const imgArea=540; // espacio cuadrado para la imagen
+      const imgX=(1080-imgArea)/2;
+      const imgY=padImg+40;
+      // Tarjeta blanca de fondo de la imagen
+      ctx.fillStyle="#ffffff";
+      ctx.beginPath();
+      const r=24;
+      ctx.moveTo(imgX+r,imgY);
+      ctx.arcTo(imgX+imgArea,imgY,imgX+imgArea,imgY+imgArea,r);
+      ctx.arcTo(imgX+imgArea,imgY+imgArea,imgX,imgY+imgArea,r);
+      ctx.arcTo(imgX,imgY+imgArea,imgX,imgY,r);
+      ctx.arcTo(imgX,imgY,imgX+imgArea,imgY,r);
+      ctx.closePath();
+      ctx.fill();
+      // Sombra suave debajo de la tarjeta
+      ctx.shadowColor="rgba(74,122,46,0.18)";ctx.shadowBlur=20;ctx.shadowOffsetY=8;
+      ctx.fill();
+      ctx.shadowColor="transparent";ctx.shadowBlur=0;ctx.shadowOffsetY=0;
+      // Imagen ENTERA dentro de la tarjeta (contain)
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(imgX+r+10,imgY+10);
+      ctx.arcTo(imgX+imgArea-10,imgY+10,imgX+imgArea-10,imgY+imgArea-10,r);
+      ctx.arcTo(imgX+imgArea-10,imgY+imgArea-10,imgX+10,imgY+imgArea-10,r);
+      ctx.arcTo(imgX+10,imgY+imgArea-10,imgX+10,imgY+10,r);
+      ctx.arcTo(imgX+10,imgY+10,imgX+imgArea-10,imgY+10,r);
+      ctx.closePath();
+      ctx.clip();
+      drawImageContain(ctx,im,imgX+10,imgY+10,imgArea-20,imgArea-20,"#ffffff");
+      ctx.restore();
+
+      // Hojita decorativa al lado de la imagen
+      drawLeaf(ctx,imgX+imgArea-40,imgY-10,32,30,"#79B553");
+
+      // Título grande con palabra destacada
+      const titleY=imgY+imgArea+80;
+      const tRes=drawHighlightTitle(ctx,title,{
+        x:540,y:titleY,maxW:980,fontFamily:"Georgia,serif",fontWeight:"bold",
+        initialSize:78,minSize:42,colorMain:"#3d2817",colorAccent:"#c8442f",
+        align:"center",baseline:"middle",maxLines:2
+      });
+      // Subtítulo en cursiva
+      drawSmartText(ctx,sub,{
+        x:540,y:titleY+tRes.height/2+34,maxW:920,fontFamily:"Georgia,serif",fontStyle:"italic",
+        initialSize:34,minSize:22,color:"#5a6e35",align:"center",baseline:"top",maxLines:2
+      });
+      // Logo abajo (si hay)
+      if(logo){
+        ctx.drawImage(logo,40,990,70,70);
+      }
+      // Línea decorativa con hojita en el centro
+      drawLeaf(ctx,540,1020,14,0,"#79B553");
+    }
+
+    // ===== ESTILO 2: TARJETA (fondo papel/tierra, imagen con marco editorial) =====
+    else if(style==="tarjeta"){
+      // Fondo color papel (avena claro)
+      ctx.fillStyle="#ebe4d3";ctx.fillRect(0,0,1080,1080);
+      // Banda superior decorativa con verde oliva
+      ctx.fillStyle="#7a8b3d";ctx.fillRect(0,0,1080,12);
+      ctx.fillStyle="#c8442f";ctx.fillRect(0,12,1080,4);
+
+      // Etiqueta superior tipo "kicker"
+      ctx.fillStyle="#7a8b3d";ctx.font="bold 22px 'Courier New',monospace";
+      ctx.textAlign="center";ctx.textBaseline="top";
+      ctx.fillText("— HUERTA AGROECOLÓGICA SXXI —",540,60);
+
+      // Imagen ENTERA en zona superior con marco
+      const imgArea=620;
+      const imgX=(1080-imgArea)/2;
+      const imgY=130;
+      // Marco color tierra
+      ctx.fillStyle="#3d2817";ctx.fillRect(imgX-12,imgY-12,imgArea+24,imgArea+24);
+      // Fondo blanco interno (por si la imagen no llena el cuadrado)
+      ctx.fillStyle="#fffaf0";ctx.fillRect(imgX,imgY,imgArea,imgArea);
+      drawImageContain(ctx,im,imgX,imgY,imgArea,imgArea);
+
+      // Sello/firma abajo izquierda
+      if(logo){
+        ctx.drawImage(logo,60,940,90,90);
+      }
+
+      // Bloque de texto a la derecha del logo
+      const textX=180;
+      ctx.textAlign="left";ctx.textBaseline="top";
+      const tRes=drawHighlightTitle(ctx,title,{
+        x:textX,y:imgY+imgArea+50,maxW:840,fontFamily:"Georgia,serif",fontWeight:"bold",
+        initialSize:64,minSize:36,colorMain:"#3d2817",colorAccent:"#c8442f",
+        align:"left",baseline:"top",maxLines:2
       });
       drawSmartText(ctx,sub,{
-        x:540,y:855+tRes.height/2+30,maxW:980,fontFamily:"Georgia,serif",fontStyle:"italic",
-        initialSize:26,minSize:18,color:"#a3d076",align:"center",baseline:"top",maxLines:2
+        x:textX,y:imgY+imgArea+50+tRes.height+12,maxW:840,fontFamily:"Georgia,serif",fontStyle:"italic",
+        initialSize:26,minSize:18,color:"#7a8b3d",align:"left",baseline:"top",maxLines:2
       });
-      ctx.fillStyle="#F9A825";ctx.fillRect(440,1010,200,4);
     }
-    else if(style==="editorial"){
-      // Imagen arriba, bloque tipográfico abajo
-      drawImageCover(ctx,im,0,0,1080,560);
-      ctx.fillStyle="#0a0a0a";ctx.fillRect(0,560,1080,520);
-      ctx.fillStyle="#79B553";ctx.font="bold 22px 'Courier New',monospace";ctx.textAlign="left";ctx.textBaseline="top";
-      ctx.fillText("— HUERTA AGROECOLÓGICA",60,610);
-      const tRes=drawSmartText(ctx,title,{
-        x:60,y:670,maxW:960,fontFamily:"Georgia,serif",fontWeight:"bold",
-        initialSize:80,minSize:42,color:"#fff",align:"left",baseline:"top",maxLines:3
+
+    // ===== ESTILO 3: POLAROID (imagen con marco blanco grueso, sello manuscrito) =====
+    else if(style==="polaroid"){
+      // Fondo: madera/tierra suave con sutil viñeta
+      const grad=ctx.createRadialGradient(540,540,200,540,540,800);
+      grad.addColorStop(0,"#d4b896");
+      grad.addColorStop(1,"#a08560");
+      ctx.fillStyle=grad;ctx.fillRect(0,0,1080,1080);
+      // Granulado natural
+      ctx.globalAlpha=0.08;
+      for(let i=0;i<400;i++){
+        ctx.fillStyle=Math.random()>0.5?"#3d2817":"#fffaf0";
+        ctx.fillRect(Math.random()*1080,Math.random()*1080,2,2);
+      }
+      ctx.globalAlpha=1;
+
+      // Hojitas decorativas en las esquinas
+      ctx.globalAlpha=0.6;
+      drawLeaf(ctx,90,120,55,-25,"#4a7a2e");
+      drawLeaf(ctx,150,90,40,30,"#79B553");
+      drawLeaf(ctx,990,990,60,160,"#4a7a2e");
+      drawLeaf(ctx,920,1020,45,200,"#79B553");
+      ctx.globalAlpha=1;
+
+      // Polaroid: marco blanco con la imagen dentro, ligeramente rotado
+      ctx.save();
+      ctx.translate(540,500);
+      ctx.rotate(-2*Math.PI/180);
+      // Sombra del polaroid
+      ctx.shadowColor="rgba(0,0,0,0.3)";ctx.shadowBlur=24;ctx.shadowOffsetY=10;
+      // Marco blanco
+      const polW=720,polH=820;
+      ctx.fillStyle="#fffaf0";
+      ctx.fillRect(-polW/2,-polH/2,polW,polH);
+      ctx.shadowColor="transparent";ctx.shadowBlur=0;ctx.shadowOffsetY=0;
+      // Imagen entera dentro
+      const innerPad=40;
+      const imgW=polW-innerPad*2;
+      const imgH=imgW; // cuadrado dentro del polaroid
+      drawImageContain(ctx,im,-imgW/2,-polH/2+innerPad,imgW,imgH,"#f5ecd9");
+      ctx.restore();
+
+      // Título tipo manuscrito sobre el polaroid (en la zona blanca de abajo)
+      ctx.save();
+      ctx.translate(540,920);
+      ctx.rotate(-2*Math.PI/180);
+      const tRes=drawHighlightTitle(ctx,title,{
+        x:0,y:0,maxW:640,fontFamily:"Georgia,serif",fontWeight:"bold",fontStyle:"italic",
+        initialSize:54,minSize:30,colorMain:"#3d2817",colorAccent:"#c8442f",
+        align:"center",baseline:"middle",maxLines:2
       });
       drawSmartText(ctx,sub,{
-        x:60,y:670+tRes.height+30,maxW:960,fontFamily:"Georgia,serif",fontStyle:"italic",
-        initialSize:30,minSize:20,color:"#a3d076",align:"left",baseline:"top",maxLines:3
+        x:0,y:tRes.height/2+18,maxW:640,fontFamily:"Georgia,serif",fontStyle:"italic",
+        initialSize:24,minSize:16,color:"#7a8b3d",align:"center",baseline:"top",maxLines:1
       });
-      ctx.strokeStyle="#F9A825";ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(60,1020);ctx.lineTo(220,1020);ctx.stroke();
+      ctx.restore();
+
+      // Logo flotante en la esquina (con leve rotación)
+      if(logo){
+        ctx.save();
+        ctx.translate(990,200);
+        ctx.rotate(8*Math.PI/180);
+        ctx.shadowColor="rgba(0,0,0,0.25)";ctx.shadowBlur=12;ctx.shadowOffsetY=4;
+        ctx.drawImage(logo,-50,-50,100,100);
+        ctx.shadowColor="transparent";ctx.shadowBlur=0;
+        ctx.restore();
+      }
     }
-    else if(style==="poster"){
-      // Fondo amarillo, imagen abajo, título grande arriba
-      ctx.fillStyle="#F9A825";ctx.fillRect(0,0,1080,1080);
-      drawImageCover(ctx,im,60,300,960,720);
-      const tRes=drawSmartText(ctx,title.toUpperCase(),{
-        x:540,y:130,maxW:980,fontFamily:"Impact,fantasy",fontWeight:"bold",
-        initialSize:96,minSize:42,color:"#0a0a0a",align:"center",baseline:"middle",maxLines:2,lineHeightMul:1.05
-      });
-      drawSmartText(ctx,sub.toUpperCase(),{
-        x:540,y:130+tRes.height/2+24,maxW:980,fontFamily:"'Courier New',monospace",
-        initialSize:22,minSize:14,color:"#0a0a0a",align:"center",baseline:"top",maxLines:2
-      });
-      // marca SXXI abajo derecha
-      ctx.fillStyle="#4a7a2e";ctx.font="bold 22px Georgia,serif";ctx.textAlign="right";ctx.textBaseline="alphabetic";
-      ctx.fillText("🌱 SXXI",1020,1050);
-    }
-    else if(style==="frame"){
-      // Fondo verde con gradiente, imagen circular, texto debajo
+
+    // ===== ESTILO 4: VERDE NATURAL (fondo verde con hojas, imagen circular completa) =====
+    else if(style==="verde"){
+      // Fondo verde con gradiente cálido
       const g=ctx.createLinearGradient(0,0,0,1080);
-      g.addColorStop(0,"#4a7a2e");g.addColorStop(1,"#1a2e0e");
+      g.addColorStop(0,"#5a7d33");g.addColorStop(1,"#3a5520");
       ctx.fillStyle=g;ctx.fillRect(0,0,1080,1080);
-      ctx.save();ctx.beginPath();ctx.arc(540,440,320,0,Math.PI*2);ctx.clip();
-      drawImageCover(ctx,im,220,120,640,640);ctx.restore();
-      ctx.strokeStyle="#a3d076";ctx.lineWidth=8;ctx.beginPath();ctx.arc(540,440,320,0,Math.PI*2);ctx.stroke();
-      const tRes=drawSmartText(ctx,title,{
-        x:540,y:850,maxW:960,fontFamily:"Georgia,serif",fontWeight:"bold",
-        initialSize:72,minSize:38,color:"#fff",align:"center",baseline:"middle",maxLines:2
+      // Hojas grandes semitransparentes en el fondo
+      ctx.globalAlpha=0.15;
+      drawLeaf(ctx,140,180,180,-40,"#a3d076");
+      drawLeaf(ctx,940,180,160,45,"#a3d076");
+      drawLeaf(ctx,150,950,170,30,"#a3d076");
+      drawLeaf(ctx,930,930,200,-50,"#a3d076");
+      ctx.globalAlpha=1;
+
+      // Círculo blanco grande con la imagen ENTERA dentro (contain)
+      const cx=540,cy=460,radius=320;
+      ctx.fillStyle="#fffaf0";
+      ctx.beginPath();
+      ctx.arc(cx,cy,radius,0,Math.PI*2);
+      ctx.fill();
+      // Sombra del círculo
+      ctx.shadowColor="rgba(0,0,0,0.2)";ctx.shadowBlur=20;ctx.shadowOffsetY=8;
+      ctx.fill();
+      ctx.shadowColor="transparent";ctx.shadowBlur=0;ctx.shadowOffsetY=0;
+      // Borde decorativo
+      ctx.strokeStyle="#a3d076";ctx.lineWidth=4;
+      ctx.beginPath();
+      ctx.arc(cx,cy,radius+12,0,Math.PI*2);
+      ctx.stroke();
+      // Imagen contain dentro del círculo
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cx,cy,radius-15,0,Math.PI*2);
+      ctx.clip();
+      // contenedor ligeramente más grande que el área visual del círculo, contain dentro
+      const sz=(radius-15)*2;
+      drawImageContain(ctx,im,cx-sz/2,cy-sz/2,sz,sz,"#fffaf0");
+      ctx.restore();
+
+      // Hojitas decorativas alrededor del círculo
+      drawLeaf(ctx,cx-radius-30,cy-radius+40,40,-50,"#a3d076");
+      drawLeaf(ctx,cx+radius+30,cy-radius+40,40,50,"#a3d076");
+      drawLeaf(ctx,cx,cy-radius-50,30,0,"#fffaf0");
+
+      // Título y subtítulo abajo
+      const titleY=850;
+      const tRes=drawHighlightTitle(ctx,title,{
+        x:540,y:titleY,maxW:980,fontFamily:"Georgia,serif",fontWeight:"bold",
+        initialSize:74,minSize:42,colorMain:"#fffaf0",colorAccent:"#FFCE54",
+        align:"center",baseline:"middle",maxLines:2
       });
       drawSmartText(ctx,sub,{
-        x:540,y:850+tRes.height/2+24,maxW:960,fontFamily:"Georgia,serif",fontStyle:"italic",
-        initialSize:28,minSize:18,color:"#a3d076",align:"center",baseline:"top",maxLines:2
+        x:540,y:titleY+tRes.height/2+28,maxW:980,fontFamily:"Georgia,serif",fontStyle:"italic",
+        initialSize:30,minSize:20,color:"#a3d076",align:"center",baseline:"top",maxLines:2
       });
-      ctx.fillStyle="#F9A825";ctx.font="16px 'Courier New',monospace";ctx.textAlign="center";ctx.textBaseline="alphabetic";
+      // Logo y línea decorativa abajo
+      if(logo){
+        ctx.drawImage(logo,40,980,72,72);
+      }
+      ctx.fillStyle="#a3d076";ctx.font="14px 'Courier New',monospace";
+      ctx.textAlign="center";ctx.textBaseline="alphabetic";
       ctx.fillText("AGROECOLOGÍA · SINTROPIA · AGROFLORESTA",540,1050);
     }
-    return canvas.toDataURL("image/jpeg",0.9);
+
+    // ===== ESTILO 5: CATÁLOGO (grid moderno con sello y badge "100% NATURAL") =====
+    else if(style==="catalogo"){
+      // Fondo: gradiente cálido tipo papel artesanal
+      const grad=ctx.createLinearGradient(0,0,1080,1080);
+      grad.addColorStop(0,"#f5ecd9");
+      grad.addColorStop(1,"#e8dcc0");
+      ctx.fillStyle=grad;ctx.fillRect(0,0,1080,1080);
+
+      // Granulado natural
+      ctx.globalAlpha=0.06;
+      for(let i=0;i<300;i++){
+        ctx.fillStyle=Math.random()>0.5?"#3d2817":"#7a8b3d";
+        ctx.fillRect(Math.random()*1080,Math.random()*1080,2,2);
+      }
+      ctx.globalAlpha=1;
+
+      // Cabecera: kicker + título a la izquierda, logo a la derecha
+      ctx.fillStyle="#7a8b3d";
+      ctx.font="bold 18px 'Courier New',monospace";
+      ctx.textAlign="left";ctx.textBaseline="top";
+      ctx.fillText("— DE NUESTRA HUERTA",60,55);
+
+      // Título
+      ctx.textAlign="left";ctx.textBaseline="top";
+      const tRes=drawHighlightTitle(ctx,title,{
+        x:60,y:90,maxW:780,fontFamily:"Georgia,serif",fontWeight:"bold",
+        initialSize:62,minSize:36,colorMain:"#3d2817",colorAccent:"#c8442f",
+        align:"left",baseline:"top",maxLines:2
+      });
+      // Logo arriba derecha
+      if(logo){
+        ctx.drawImage(logo,940,50,90,90);
+      }
+
+      // Composición de imágenes (combo si hay varias)
+      const comboY=90+tRes.height+40;
+      const comboH=720;
+      const comboX=60;
+      const comboW=960;
+      // Fondo blanco con bordes redondeados
+      ctx.fillStyle="#fffaf0";
+      const rr=18;
+      ctx.beginPath();
+      ctx.moveTo(comboX+rr,comboY);
+      ctx.arcTo(comboX+comboW,comboY,comboX+comboW,comboY+comboH,rr);
+      ctx.arcTo(comboX+comboW,comboY+comboH,comboX,comboY+comboH,rr);
+      ctx.arcTo(comboX,comboY+comboH,comboX,comboY,rr);
+      ctx.arcTo(comboX,comboY,comboX+comboW,comboY,rr);
+      ctx.closePath();
+      ctx.fill();
+      ctx.shadowColor="rgba(74,122,46,0.18)";ctx.shadowBlur=18;ctx.shadowOffsetY=6;
+      ctx.fill();
+      ctx.shadowColor="transparent";ctx.shadowBlur=0;ctx.shadowOffsetY=0;
+      // Imágenes dentro
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(comboX+12,comboY+12,comboW-24,comboH-24);
+      ctx.clip();
+      drawImagesCombo(ctx,imgs,comboX+12,comboY+12,comboW-24,comboH-24,"#fffaf0");
+      ctx.restore();
+
+      // Sello/badge "100% NATURAL" o el que indique la IA, abajo derecha
+      const badgeText=badgeOverride||"100%\nNATURAL";
+      drawBadge(ctx,950,920,90,badgeText,{
+        bgColor:"#c8442f",textColor:"#fffaf0",borderColor:"#fffaf0",rotation:-12,fontSize:22
+      });
+
+      // Subtítulo a la izquierda abajo
+      drawSmartText(ctx,sub,{
+        x:60,y:880,maxW:780,fontFamily:"Georgia,serif",fontStyle:"italic",
+        initialSize:30,minSize:20,color:"#7a8b3d",align:"left",baseline:"top",maxLines:2
+      });
+      // Línea decorativa
+      ctx.fillStyle="#c8442f";ctx.fillRect(60,1010,140,4);
+    }
+
+    // ===== ESTILO 6: PACK (composición moderna con frase de venta + ribbon comercial) =====
+    else if(style==="pack"){
+      // Fondo dual: media tierra arriba, media crema abajo
+      const grad=ctx.createLinearGradient(0,0,0,1080);
+      grad.addColorStop(0,"#3d2817");
+      grad.addColorStop(0.5,"#3d2817");
+      grad.addColorStop(0.5,"#f5ecd9");
+      grad.addColorStop(1,"#ebe4d3");
+      ctx.fillStyle=grad;ctx.fillRect(0,0,1080,1080);
+
+      // Hojitas decorativas en la zona oscura
+      ctx.globalAlpha=0.18;
+      drawLeaf(ctx,80,80,55,-30,"#a3d076");
+      drawLeaf(ctx,1000,100,60,40,"#79B553");
+      ctx.globalAlpha=1;
+
+      // Título arriba en la zona oscura, grande y comercial
+      ctx.textAlign="center";ctx.textBaseline="top";
+      const tRes=drawHighlightTitle(ctx,title.toUpperCase(),{
+        x:540,y:80,maxW:980,fontFamily:"Georgia,serif",fontWeight:"bold",
+        initialSize:88,minSize:48,colorMain:"#fffaf0",colorAccent:"#FFCE54",
+        align:"center",baseline:"top",maxLines:2,lineHeightMul:1.05
+      });
+      // Subtítulo
+      drawSmartText(ctx,sub,{
+        x:540,y:80+tRes.height+18,maxW:920,fontFamily:"Georgia,serif",fontStyle:"italic",
+        initialSize:32,minSize:22,color:"#a3d076",align:"center",baseline:"top",maxLines:2
+      });
+
+      // Composición central de imágenes — atravesando la línea entre las dos zonas
+      const imgY=380;
+      const imgH=580;
+      const imgX=80;
+      const imgW=920;
+      // Fondo blanco con sombra fuerte (efecto producto destacado)
+      ctx.shadowColor="rgba(0,0,0,0.4)";ctx.shadowBlur=32;ctx.shadowOffsetY=10;
+      ctx.fillStyle="#fffaf0";
+      ctx.fillRect(imgX,imgY,imgW,imgH);
+      ctx.shadowColor="transparent";ctx.shadowBlur=0;ctx.shadowOffsetY=0;
+      // Marco interno
+      ctx.strokeStyle="#c8442f";
+      ctx.lineWidth=4;
+      ctx.strokeRect(imgX+8,imgY+8,imgW-16,imgH-16);
+      // Imágenes
+      drawImagesCombo(ctx,imgs,imgX+18,imgY+18,imgW-36,imgH-36,"#fffaf0");
+
+      // Ribbon comercial en la esquina superior derecha de la imagen
+      drawRibbon(ctx,920,420,180,52,"NUEVO",{
+        bgColor:"#c8442f",textColor:"#fffaf0",rotation:-8,fontSize:30
+      });
+
+      // Sello/badge en la esquina inferior izquierda de la imagen
+      const badgeText=badgeOverride||"AGRO\nECO";
+      drawBadge(ctx,170,920,72,badgeText,{
+        bgColor:"#7a8b3d",textColor:"#fffaf0",borderColor:"#fffaf0",rotation:-8,fontSize:18
+      });
+
+      // Logo abajo derecha
+      if(logo){
+        ctx.drawImage(logo,950,990,72,72);
+      }
+      // Pie de marca
+      ctx.fillStyle="#7a8b3d";ctx.font="bold 16px 'Courier New',monospace";
+      ctx.textAlign="left";ctx.textBaseline="alphabetic";
+      ctx.fillText("HUERTA SXXI · COSECHA PROPIA",60,1030);
+    }
+
+    return canvas.toDataURL("image/jpeg",0.92);
   };
 
   const generarModelos=async()=>{
     if(!img)return;
     setModelosBusy(true);setModelos([]);
     try{
-      if(modelosText.trim()){
-        const sug=await geminiText(`Sos redactor/a creativo/a de la Huerta Agroecológica Siglo XXI (Pigüé, provincia de Buenos Aires, Argentina). Escribís en español rioplatense, con voseo, con voz cálida y artesanal. Dame un título MUY corto (máximo 3 palabras, idealmente 2) impactante y un subtítulo de 5 a 8 palabras que complemente. Tienen que ser frases que entren en una imagen sin que el texto quede chiquito. Contexto que me pasa el usuario: "${modelosText}". Respondé SÓLO JSON sin markdown ni explicaciones: {"titulo":"...","subtitulo":"..."}`);
-        try{
-          const p=JSON.parse(sug.replace(/```json|```/g,"").trim());
-          if(p.titulo)setModelosTitulo(p.titulo);
-          if(p.subtitulo)setModelosSubtitulo(p.subtitulo);
-        }catch{}
-      }
-      const im=await loadImage(img);
-      const styles=["minimal","editorial","poster","frame"];
-      const results=await Promise.all(styles.map(s=>buildModelo(s,im)));
-      setModelos(results.map((url,i)=>({url,style:styles[i],label:["Minimal","Editorial","Póster","Marco"][i]})));
-    }catch(e){alert("Hubo un error generando los modelos: "+e.message);}
+      // Cargar todas las imágenes: la principal + las extra
+      const allUrls=[img,...modelosImgs];
+      const allImgs=await Promise.all(allUrls.map(u=>loadImage(u)));
+      const hasMultiple=allImgs.length>1;
+
+      // Elegir set de estilos según cuántas imágenes hay
+      const styles=hasMultiple
+        ?["calido","catalogo","verde","pack"]
+        :["calido","tarjeta","polaroid","verde"];
+      const labels=hasMultiple
+        ?["Cálido","Catálogo","Verde","Pack comercial"]
+        :["Cálido","Tarjeta","Polaroid","Verde"];
+
+      // Pedir 4 propuestas distintas con tonos variados + sello comercial
+      let propuestas=null;
+      const ctxText=modelosText.trim()||"productos artesanales de la huerta agroecológica";
+      const sug=await geminiText(`Sos copywriter creativo/a de la Huerta Agroecológica Siglo XXI (Pigüé, Argentina). Hablás en rioplatense con voseo, tono cálido, artesanal, vendedor pero auténtico (sin frases trilladas tipo "el sabor que querés").
+
+Te paso un contexto y necesito 4 PROPUESTAS DE TÍTULO + SUBTÍTULO + SELLO distintas para una serie de posts del MISMO producto, cada una en un tono diferente para que el cliente tenga variantes. ${hasMultiple?`Hay ${allImgs.length} imágenes del producto: tené en cuenta que se van a mostrar varias en algunos modelos (combo) y una sola en otros.`:""}
+
+Contexto: "${ctxText}"
+
+Para cada propuesta generá:
+- titulo: 2 a 5 palabras. PUEDE incluir UNA palabra envuelta en *asteriscos* para destacarla en otro color (ej: "Alma de *Huerta*", "*Frambuesa* real"). Usalo cuando agregue impacto visual.
+- subtitulo: 5 a 10 palabras. Tiene que vender o explicar el producto de forma clara y emocional.
+- sello: 1 a 2 palabras CORTAS para un badge circular (ej: "100% NATURAL", "AGROECOLÓGICO", "ARTESANAL", "COSECHA PROPIA", "SIN AZÚCAR", "NUEVO", "VEGANO"). Usá saltos de línea \\n entre palabras si son dos para que entre en el círculo. Elegí el sello más relevante al contexto del producto.
+
+Las 4 propuestas deben tener tonos distintos y complementarse:
+1. EMOCIONAL Y CÁLIDO (ej: "Alma de Huerta" + "Hecho con cariño en cada bocado")
+2. DE IMPACTO / CURIOSIDAD (ej: "Mirá esto" / "No es un bombón común" + "Probá una vez y vas a entender")
+3. DESTACAR INGREDIENTE / CALIDAD (ej: "Frambuesa real" / "Cosecha propia" + "Fruta de nuestra huerta, recién cortada")
+4. COMERCIAL DIRECTO / LLAMADO (ej: "Pedí el tuyo" / "Encargá ya" + "WhatsApp en bio. Llevátela hoy")
+
+Respondé SÓLO JSON sin markdown ni explicaciones, exactamente con esta estructura:
+{"propuestas":[{"titulo":"","subtitulo":"","sello":""},{"titulo":"","subtitulo":"","sello":""},{"titulo":"","subtitulo":"","sello":""},{"titulo":"","subtitulo":"","sello":""}]}`);
+      try{
+        const p=JSON.parse(sug.replace(/```json|```/g,"").trim());
+        if(p.propuestas&&Array.isArray(p.propuestas)&&p.propuestas.length>=4){
+          propuestas=p.propuestas;
+          if(p.propuestas[0]?.titulo)setModelosTitulo(p.propuestas[0].titulo.replace(/\*/g,""));
+          if(p.propuestas[0]?.subtitulo)setModelosSubtitulo(p.propuestas[0].subtitulo);
+        }
+      }catch{}
+
+      // Generar los 4 modelos en paralelo
+      const results=await Promise.all(styles.map((s,i)=>{
+        const t=propuestas?.[i]?.titulo;
+        const sub=propuestas?.[i]?.subtitulo;
+        const badge=propuestas?.[i]?.sello;
+        const imgsForStyle=pickImagesFor(s,allImgs);
+        return buildModelo(s,imgsForStyle,t,sub,badge);
+      }));
+      setModelos(results.map((url,i)=>({
+        url,style:styles[i],label:labels[i],
+        titulo:propuestas?.[i]?.titulo||modelosTitulo,
+        subtitulo:propuestas?.[i]?.subtitulo||modelosSubtitulo,
+        sello:propuestas?.[i]?.sello||""
+      })));
+    }catch(e){console.error(e);alert("Hubo un error generando los modelos: "+e.message);}
     setModelosBusy(false);
   };
 
@@ -677,12 +1317,15 @@ function App(){
             <div className="mono" style={{color:"var(--sun)",marginTop:2}}>— Estudio editorial —</div>
           </div>
         </div>
-        {img&&(
-          <div style={{display:"flex",alignItems:"center",gap:8}}>
-            <img src={img} alt="" style={{width:36,height:36,borderRadius:8,objectFit:"cover",border:"1px solid var(--border-strong)"}}/>
-            <button onClick={clearImg} title="Quitar imagen" style={{background:"rgba(255,255,255,0.06)",border:"1px solid var(--border)",color:"#fff",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:14}}>✕</button>
-          </div>
-        )}
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <button onClick={()=>{setApiKeyDraft(getApiKey());setApiKeyMessage("");setApiKeyModal(true);}} title={hasApiKey?"API key configurada":"Configurar API key"} style={{background:hasApiKey?"rgba(121,181,83,0.15)":"rgba(249,168,37,0.2)",border:`1px solid ${hasApiKey?"var(--green)":"var(--sun)"}`,color:hasApiKey?"var(--green-l)":"var(--sun)",borderRadius:8,width:34,height:34,cursor:"pointer",fontSize:16,fontFamily:"inherit"}}>⚙</button>
+          {img&&(
+            <>
+              <img src={img} alt="" style={{width:36,height:36,borderRadius:8,objectFit:"cover",border:"1px solid var(--border-strong)"}}/>
+              <button onClick={clearImg} title="Quitar imagen" style={{background:"rgba(255,255,255,0.06)",border:"1px solid var(--border)",color:"#fff",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:14}}>✕</button>
+            </>
+          )}
+        </div>
       </header>
 
       <input ref={fileRef} type="file" accept="image/*" style={{display:"none"}} onChange={handleFile}/>
@@ -884,26 +1527,66 @@ function App(){
           {tool==="modelos"&&(
             <div className="fade">
               <Card style={{marginBottom:14}}>
-                <div className="editorial" style={{fontSize:13,color:"var(--muted)",marginBottom:12,fontStyle:"italic",lineHeight:1.5}}>La IA te arma cuatro versiones distintas a partir de tu imagen. Elegís la que más te guste.</div>
+                <div className="editorial" style={{fontSize:13,color:"var(--muted)",marginBottom:12,fontStyle:"italic",lineHeight:1.5}}>La IA te arma cuatro versiones distintas a partir de tus imágenes. Si subís varias, algunas las combina en grid y otras usa la principal.</div>
                 <Lbl>Título del posteo</Lbl>
                 <input value={modelosTitulo} onChange={e=>setModelosTitulo(e.target.value)} placeholder="Por ejemplo: Cosecha de tomate" style={{width:"100%",background:"rgba(255,255,255,0.05)",border:"1px solid var(--border)",borderRadius:8,padding:10,color:"#fff",fontSize:14,marginBottom:10,fontFamily:"Georgia,serif"}}/>
                 <Lbl>Subtítulo (opcional)</Lbl>
                 <input value={modelosSubtitulo} onChange={e=>setModelosSubtitulo(e.target.value)} placeholder="Una frase que acompañe" style={{width:"100%",background:"rgba(255,255,255,0.05)",border:"1px solid var(--border)",borderRadius:8,padding:10,color:"#fff",fontSize:13,marginBottom:10,fontFamily:"Georgia,serif"}}/>
                 <Lbl>O contame el contexto y la IA se encarga</Lbl>
                 <textarea value={modelosText} onChange={e=>setModelosText(e.target.value)} placeholder="Por ejemplo: Estamos cosechando albahaca orgánica y queremos vender ramitos..." style={{width:"100%",background:"rgba(255,255,255,0.05)",border:"1px solid var(--border)",borderRadius:8,padding:10,color:"#fff",fontSize:13,resize:"vertical",minHeight:70,marginBottom:12,fontFamily:"Georgia,serif"}}/>
-                <Btn onClick={generarModelos} disabled={modelosBusy} variant="sun">{modelosBusy?"Dibujando los cuatro modelos...":"✦ Generar cuatro modelos"}</Btn>
+
+                {/* Imágenes adicionales para combos */}
+                <Lbl>Imágenes del producto ({1+modelosImgs.length} cargada{modelosImgs.length===0?"":"s"})</Lbl>
+                <div style={{fontSize:11,color:"var(--muted)",fontStyle:"italic",marginBottom:8,lineHeight:1.5}}>La principal es la que ya subiste arriba. Sumá más si querés que la app las combine en algunos modelos.</div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(70px,1fr))",gap:6,marginBottom:10}}>
+                  {/* Imagen principal */}
+                  <div style={{position:"relative",aspectRatio:"1",borderRadius:8,overflow:"hidden",background:"#000",border:"2px solid var(--green)"}}>
+                    <img src={img} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                    <div className="mono" style={{position:"absolute",bottom:0,left:0,right:0,background:"rgba(121,181,83,0.9)",color:"#fff",fontSize:8,padding:"2px 4px",textAlign:"center"}}>PRINCIPAL</div>
+                  </div>
+                  {/* Imágenes adicionales */}
+                  {modelosImgs.map((u,i)=>(
+                    <div key={i} style={{position:"relative",aspectRatio:"1",borderRadius:8,overflow:"hidden",background:"#000",border:"1px solid var(--border-strong)"}}>
+                      <img src={u} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                      <button onClick={()=>{
+                        URL.revokeObjectURL(u);
+                        setModelosImgs(p=>p.filter((_,idx)=>idx!==i));
+                      }} style={{position:"absolute",top:2,right:2,background:"rgba(0,0,0,0.8)",border:"none",color:"#fff",borderRadius:"50%",width:20,height:20,cursor:"pointer",fontSize:11}}>✕</button>
+                    </div>
+                  ))}
+                  {/* Botón agregar */}
+                  <button onClick={()=>modelosImgsRef.current?.click()} style={{aspectRatio:"1",borderRadius:8,border:"2px dashed var(--border-strong)",background:"transparent",color:"var(--green-l)",cursor:"pointer",fontSize:24,fontFamily:"Georgia,serif"}}>+</button>
+                </div>
+                <input ref={modelosImgsRef} type="file" accept="image/*" multiple style={{display:"none"}} onChange={e=>{
+                  const files=Array.from(e.target.files).filter(f=>f.type.startsWith("image/"));
+                  setModelosImgs(p=>[...p,...files.map(f=>URL.createObjectURL(f))]);
+                  e.target.value="";
+                }}/>
+
+                <Btn onClick={generarModelos} disabled={modelosBusy} variant="sun">{modelosBusy?"Dibujando los cuatro modelos...":`✦ Generar cuatro modelos${modelosImgs.length>0?` (con ${1+modelosImgs.length} fotos)`:""}`}</Btn>
               </Card>
 
               {modelos.length>0&&(
                 <>
-                  <Lbl style={{marginLeft:4}}>Tocá el que te guste para descargarlo</Lbl>
+                  <Lbl style={{marginLeft:4}}>4 propuestas distintas. Tocá descargar la que te guste</Lbl>
                   <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
                     {modelos.map(m=>(
                       <div key={m.style} style={{borderRadius:12,overflow:"hidden",border:"1px solid var(--border-strong)",background:"rgba(0,0,0,0.4)"}}>
                         <img src={m.url} alt={m.label} style={{width:"100%",aspectRatio:"1",objectFit:"cover",display:"block"}}/>
-                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 12px"}}>
-                          <span className="mono" style={{color:"var(--green-l)",fontSize:10}}>{m.label}</span>
-                          <button onClick={()=>download(m.url,`huerta-${m.style}.jpg`)} style={{background:"var(--green)",border:"none",color:"#fff",borderRadius:6,padding:"6px 12px",fontSize:11,cursor:"pointer",fontFamily:"Georgia,serif",fontWeight:700}}>⬇ Descargar</button>
+                        <div style={{padding:"10px 12px"}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:m.titulo?6:0}}>
+                            <span className="mono" style={{color:"var(--green-l)",fontSize:10}}>{m.label}</span>
+                            <button onClick={()=>download(m.url,`huerta-${m.style}.jpg`)} style={{background:"var(--green)",border:"none",color:"#fff",borderRadius:6,padding:"6px 12px",fontSize:11,cursor:"pointer",fontFamily:"Georgia,serif",fontWeight:700}}>⬇ Descargar</button>
+                          </div>
+                          {m.titulo&&(
+                            <div style={{fontSize:11,color:"var(--cream)",lineHeight:1.4,opacity:0.85}}>
+                              <div style={{fontWeight:700,marginBottom:2,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                                <span>{m.titulo.replace(/\*/g,"")}</span>
+                                {m.sello&&<span className="mono" style={{fontSize:8,padding:"2px 6px",borderRadius:10,background:"rgba(200,68,47,0.25)",color:"#FFCE54",border:"1px solid rgba(200,68,47,0.5)"}}>{m.sello.replace(/\n/g," ")}</span>}
+                              </div>
+                              {m.subtitulo&&<div style={{fontStyle:"italic",color:"var(--muted)",fontSize:10}}>{m.subtitulo}</div>}
+                            </div>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -1074,6 +1757,49 @@ function App(){
       </footer>
 
       <div className="stripe"/>
+
+      {/* MODAL API KEY */}
+      {apiKeyModal&&(
+        <div onClick={e=>{if(e.target===e.currentTarget)setApiKeyModal(false);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.85)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
+          <div style={{background:"#141414",border:"1px solid var(--border-strong)",borderRadius:16,padding:24,maxWidth:480,width:"100%",boxShadow:"0 20px 60px rgba(0,0,0,0.5)"}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+              <div className="brand" style={{fontSize:20}}>Configurar IA</div>
+              <button onClick={()=>setApiKeyModal(false)} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--muted)",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16}}>✕</button>
+            </div>
+            {apiKeyMessage&&(
+              <div style={{background:"rgba(249,168,37,0.12)",border:"1px solid var(--sun)",color:"var(--sun-l)",borderRadius:8,padding:"10px 12px",fontSize:12,marginBottom:14,lineHeight:1.5}}>
+                ⚠ {apiKeyMessage}
+              </div>
+            )}
+            <div className="editorial" style={{fontSize:13,color:"var(--muted)",lineHeight:1.6,marginBottom:14}}>
+              Para que la IA funcione (modelos automáticos, sugerencias de copy), necesitás una clave de Google Gemini. Es gratis. Se guarda <strong style={{color:"var(--green-l)"}}>sólo en este dispositivo</strong>, no se sube a ningún lado.
+            </div>
+            <div style={{background:"rgba(121,181,83,0.08)",border:"1px solid rgba(121,181,83,0.3)",borderRadius:8,padding:12,marginBottom:14,fontSize:12,lineHeight:1.7}}>
+              <div className="mono" style={{color:"var(--green-l)",marginBottom:6,fontSize:10}}>Cómo conseguir tu clave</div>
+              <ol style={{paddingLeft:18,margin:0}}>
+                <li>Andá a <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener" style={{color:"var(--sun)",textDecoration:"underline"}}>aistudio.google.com/app/apikey</a></li>
+                <li>Iniciá sesión con tu cuenta de Google</li>
+                <li>Tocá <strong>"Create API key"</strong> y copiá la clave</li>
+                <li>Pegala acá abajo y guardá</li>
+              </ol>
+            </div>
+            <Lbl>Tu clave de Gemini</Lbl>
+            <input
+              value={apiKeyDraft}
+              onChange={e=>setApiKeyDraft(e.target.value)}
+              placeholder="AIzaSy..."
+              autoComplete="off"
+              spellCheck="false"
+              style={{width:"100%",background:"rgba(255,255,255,0.05)",border:"1px solid var(--border-strong)",borderRadius:8,padding:12,color:"#fff",fontSize:13,fontFamily:"'Courier New',monospace",marginBottom:14}}
+            />
+            <div style={{display:"grid",gridTemplateColumns:hasApiKey?"1fr 1fr":"1fr",gap:8}}>
+              <Btn onClick={saveApiKeyDraft} disabled={!apiKeyDraft.trim()} variant="sun">Guardar clave</Btn>
+              {hasApiKey&&<Btn onClick={clearStoredKey} variant="ghost" style={{color:"var(--muted)"}}>Borrar guardada</Btn>}
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
