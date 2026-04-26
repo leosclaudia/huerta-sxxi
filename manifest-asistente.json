@@ -1,14 +1,16 @@
 {
-  "name": "Huerta SXXI · Asistente",
-  "short_name": "Huerta Asistente",
-  "description": "Gestión integral de la Huerta Agroecológica Siglo XXI",
-  "start_url": "./asistente.html",
+  "name": "Huerta Agroecológica Siglo XXI",
+  "short_name": "Huerta SXXI",
+  "description": "Aplicaciones de la Huerta Agroecológica Siglo XXI",
+  "start_url": "index.html",
   "scope": "./",
+  "id": "huerta-sxxi-portal",
   "display": "standalone",
   "background_color": "#0a0a0a",
   "theme_color": "#79B553",
   "orientation": "portrait-primary",
   "lang": "es-AR",
+  "dir": "ltr",
   "categories": ["productivity", "business"],
   "icons": [
     {
@@ -31,8 +33,19 @@
     }
   ],
   "shortcuts": [
-    {"name": "Pedidos", "url": "./asistente.html?v=pedidos"},
-    {"name": "Chat Técnico", "url": "./asistente.html?v=chatTec"},
-    {"name": "Calendario", "url": "./asistente.html?v=calendario"}
+    {
+      "name": "Estudio",
+      "short_name": "Estudio",
+      "description": "Diseño visual para redes",
+      "url": "diseno.html",
+      "icons": [{"src": "icon-192.png", "sizes": "192x192", "type": "image/png"}]
+    },
+    {
+      "name": "Asistente",
+      "short_name": "Asistente",
+      "description": "Gestión integral de la huerta",
+      "url": "asistente.html",
+      "icons": [{"src": "icon-192.png", "sizes": "192x192", "type": "image/png"}]
+    }
   ]
 }
