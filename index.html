@@ -4,9 +4,14 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no"/>
 <title>Huerta Agroecológica Siglo XXI</title>
+<link rel="manifest" href="manifest-index.json"/>
 <link rel="icon" type="image/png" href="favicon-32.png"/>
 <link rel="apple-touch-icon" href="icon-192.png"/>
 <meta name="theme-color" content="#79B553"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-title" content="Huerta SXXI"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 <meta name="description" content="Huerta Agroecológica Siglo XXI · Pigüé · Estudio de diseño y asistente integral"/>
 <style>
   :root{
@@ -283,7 +288,7 @@
 
   <div class="grid">
 
-    <a class="app-card studio" href="diseno.html" aria-label="Abrir Estudio de Diseño">
+    <a class="app-card studio" href="diseno.html" target="_blank" rel="noopener" aria-label="Abrir Estudio de Diseño en una nueva pestaña">
       <div class="icon">✦</div>
       <h2>Estudio</h2>
       <div class="subtitle">Diseño visual para redes</div>
@@ -298,7 +303,7 @@
       <div class="accent-bar"></div>
     </a>
 
-    <a class="app-card" href="asistente.html" aria-label="Abrir Asistente Integral">
+    <a class="app-card" href="asistente.html" target="_blank" rel="noopener" aria-label="Abrir Asistente Integral en una nueva pestaña">
       <div class="icon">◉</div>
       <h2>Asistente</h2>
       <div class="subtitle">Gestión integral de la huerta</div>
@@ -331,6 +336,14 @@
 </footer>
 
 <div class="stripe"></div>
+
+<script>
+  if("serviceWorker" in navigator){
+    window.addEventListener("load",()=>{
+      navigator.serviceWorker.register("sw-index.js").catch(()=>{});
+    });
+  }
+</script>
 
 </body>
 </html>
